@@ -2,9 +2,9 @@
 
 Automação de processos documentais para o setor de tributos.
 
-## Etapa 01
+## Etapa 02
 
-Formulário de avaliação e substituição de chaves em um DOCX.
+Seleção dos três documentos, campos por modelo e frações do desdobro.
 
 Esta é uma etapa da reconstrução incremental do projeto. Os documentos de exemplo são demonstrativos e sem validade.
 
