@@ -1,0 +1,17 @@
+Tributos Docs inclui componentes de terceiros
+
+- Python 3.12.10 (Python Software Foundation). Licença em runtime/LICENSE.txt.
+  https://www.python.org/downloads/release/python-31210/
+- Tcl/Tk 8.6 (distribuição do Python). Licenças junto ao componente.
+  https://www.tcl-lang.org/software/tcltk/
+- lxml 6.1.1, Pillow 12.3.0 e pypdfium2 5.14.0.
+  As licenças e os avisos distribuídos pelos projetos estão nas pastas
+  runtime/Lib/site-packages e nas respectivas pastas .dist-info.
+  https://pypi.org/project/lxml/6.1.1/
+  https://pypi.org/project/Pillow/12.3.0/
+  https://pypi.org/project/pypdfium2/5.14.0/
+- LibreOffice 26.2.7 x64 (The Document Foundation).
+  O instalador original vem incluído e instala seus próprios avisos.
+  Código-fonte e avisos de licença do LibreOffice
+  https://www.libreoffice.org/about-us/licenses/
+  https://download.documentfoundation.org/libreoffice/src/26.2.7/

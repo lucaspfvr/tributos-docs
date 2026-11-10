@@ -2,9 +2,9 @@
 
 Automação de processos documentais para o setor de tributos.
 
-## Etapa 03
+## Etapa 04
 
-Geração de PDF a partir do Word preenchido.
+Aplicativo integrado com prévia, histórico, revisões, modelos editáveis, backups e empacotamento.
 
 Esta é uma etapa da reconstrução incremental do projeto. Os documentos de exemplo são demonstrativos e sem validade.
 
