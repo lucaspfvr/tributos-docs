@@ -2,9 +2,9 @@
 
 Automação de processos documentais para o setor de tributos.
 
-## Etapa 05
+## Etapa 06
 
-Arquivo por categoria, busca no histórico e integração de impressão no Windows.
+Paletas selecionáveis e nomes de PDFs derivados do tipo, número e proprietário.
 
 Esta é uma etapa da reconstrução incremental do projeto. Os documentos de exemplo são demonstrativos e sem validade.
 

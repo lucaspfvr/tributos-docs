@@ -28,6 +28,14 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY);
 """
 APP_ID = 0x54524443
 FOLDERS = {"desdobro": "DESDOBRO", "retificacao": "RETIFICAÇÃO", "avaliacao": "AVALIAÇÃO"}
+UNSAFE_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def pdf_stem(kind, title, reference, owner, record_id=None):
+    number = reference.strip() or (f"{record_id:03d}" if record_id is not None else "")
+    fields = (FOLDERS.get(kind, title), number, owner)
+    parts = [" ".join(UNSAFE_FILENAME.sub("-", value).upper().split()).strip(" .-") for value in fields]
+    return " ".join(filter(None, parts))[:145].rstrip(" .") or "DOCUMENTO"
 
 
 def folder_name(label):
@@ -83,9 +91,6 @@ class Storage:
         rows = self.connection.execute("SELECT id, title, kind, document FROM models ORDER BY title COLLATE NOCASE")
         return [Model(*row) for row in rows]
 
-    def model_count(self):
-        return self.connection.execute("SELECT count(*) FROM models").fetchone()[0]
-
     def save_model(self, model):
         if not model.title.strip():
             raise ValueError("Informe o nome do modelo.")
@@ -113,12 +118,24 @@ class Storage:
                 version = self.connection.execute(
                     "SELECT coalesce(max(version), 0)+1 FROM revisions WHERE record_id=?", (record_id,)
                 ).fetchone()[0]
-                file = f"{now.year}/{folder_name(model.title)}/TD-{record_id:06d}-v{version:02d}-{uuid4().hex[:12]}.pdf"
+                prefix = f"{now.year}/{folder_name(model.title)}"
+                stem = pdf_stem(model.kind, model.title, reference, owner, record_id)
+                while True:
+                    filename = self.available_name(model.kind, stem)
+                    target = self.destination(model.kind) / filename
+                    try:
+                        with target.open("xb"):
+                            pass
+                    except FileExistsError:
+                        continue
+                    path = target
+                    break
+                file = f"{prefix}/{filename}"
                 self.connection.execute("INSERT INTO revisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (record_id, version, now.isoformat(timespec="seconds"), owner, reference, model.id,
                      model.title, model.kind, model.document, json.dumps(form, ensure_ascii=False),
                      json.dumps(fractions, ensure_ascii=False), file, pdf))
-                path = self.ensure_pdf(file, pdf, model.kind)
+                atomic_write(path, pdf)
         except Exception:
             if path is not None:
                 path.unlink(missing_ok=True)
@@ -129,9 +146,9 @@ class Storage:
         self.prepare_archive()
         metadata = {}
         for row in self.connection.execute("""
-            SELECT record_id, version, title, owner, created, reference, file FROM revisions
+            SELECT record_id, version, title, owner, created, reference, file, kind FROM revisions
         """):
-            metadata[Path(row["file"]).name.casefold()] = dict(row)
+            metadata[FOLDERS.get(row["kind"], "OUTROS"), Path(row["file"]).name.casefold()] = dict(row)
         rows = []
         for folder in self.categories():
             for path in (self.archive / folder).rglob("*"):
@@ -143,7 +160,7 @@ class Storage:
                     modified = path.stat().st_mtime
                 except FileNotFoundError:
                     continue
-                row = dict(metadata.get(path.name.casefold(), {}))
+                row = dict(metadata.get((folder, path.name.casefold()), {}))
                 if not row:
                     row = {"record_id": None, "version": None, "title": folder,
                            "owner": "", "reference": "",
@@ -165,6 +182,20 @@ class Storage:
     def destination(self, kind):
         return self.archive / FOLDERS.get(kind, "OUTROS")
 
+    def available_name(self, kind, stem):
+        category = FOLDERS.get(kind, "OUTROS")
+        folder = self.archive / category
+        occupied = {p.name.casefold() for p in folder.iterdir()}
+        for row in self.connection.execute("SELECT file, kind FROM revisions"):
+            if FOLDERS.get(row["kind"], "OUTROS") == category:
+                occupied.add(Path(row["file"]).name.casefold())
+        name = f"{stem}.pdf"
+        suffix = 2
+        while name.casefold() in occupied:
+            name = f"{stem} ({suffix}).pdf"
+            suffix += 1
+        return name
+
     def prepare_archive(self):
         for name in self.categories():
             (self.archive / name).mkdir(parents=True, exist_ok=True)
@@ -176,17 +207,33 @@ class Storage:
             self.connection.execute("INSERT INTO settings VALUES ('archive-v2')")
 
     def copy_archived_pdfs(self):
-        for row in self.connection.execute("SELECT file, pdf, kind FROM revisions"):
-            self.ensure_pdf(row["file"], row["pdf"], row["kind"])
+        for name in self.categories():
+            (self.archive / name).mkdir(parents=True, exist_ok=True)
+        for row in self.connection.execute("SELECT file, pdf, kind, record_id, version FROM revisions"):
+            relative = row["file"]
+            path = self.archive_path(relative, row["kind"])
+            if path.exists() and path.read_bytes() != row["pdf"]:
+                filename = self.available_name(row["kind"], path.stem)
+                relative = f"{relative.rsplit('/', 1)[0]}/{filename}"
+                self.connection.execute("UPDATE revisions SET file=? WHERE record_id=? AND version=?",
+                                        (relative, row["record_id"], row["version"]))
+            self.ensure_pdf(relative, row["pdf"], row["kind"])
+
+    def archive_path(self, relative, kind):
+        # Paths in restored backups are treated as data.
+        parts = relative.split("/")
+        if (len(parts) != 3 or not re.fullmatch(r"[0-9]{4}", parts[0])
+                or not re.fullmatch(r"[a-z0-9-]{1,48}", parts[1])
+                or not 5 <= len(parts[2]) <= 175 or not parts[2].endswith(".pdf")
+                or UNSAFE_FILENAME.search(parts[2])):
+            raise ValueError("O caminho do PDF arquivado é inválido.")
+        return self.destination(kind) / parts[2]
 
     def ensure_pdf(self, relative, pdf, kind=None):
-        # Paths in restored backups are treated as data.
-        if not re.fullmatch(r"[0-9]{4}/[a-z0-9-]{1,48}/TD-[0-9]+-v[0-9]+-[0-9a-f]{12}\.pdf", relative):
-            raise ValueError("O caminho do PDF arquivado é inválido.")
         if kind is None:
             row = self.connection.execute("SELECT kind FROM revisions WHERE file=?", (relative,)).fetchone()
             kind = row["kind"] if row else None
-        path = self.destination(kind) / Path(relative).name
+        path = self.archive_path(relative, kind)
         if not path.exists():
             atomic_write(path, pdf)
         return path
@@ -220,4 +267,6 @@ class Storage:
         finally:
             backup.close()
         self.connection.executescript(SCHEMA)
-        self.copy_archived_pdfs()
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self.copy_archived_pdfs()

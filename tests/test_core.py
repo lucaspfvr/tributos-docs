@@ -139,6 +139,20 @@ class ProjectTest(unittest.TestCase):
         self.assertEqual(self.store.history("REF-100"), [])
         self.assertFalse(pdf.exists())
 
+    def test_pdf_names_use_reference_owner_and_preserve_existing_files(self):
+        model = self.models["desdobro"]
+        fields = dict(self.fields, NomeProprietario="Pessoa de Teste")
+        rid, _, first = self.store.save_record(model, fields, self.fractions, b"PDF original", "001")
+        _, _, second = self.store.save_record(model, fields, self.fractions, b"PDF revisado", "001", rid)
+        self.assertEqual(first.name, "DESDOBRO 001 PESSOA DE TESTE.pdf")
+        self.assertEqual(second.name, "DESDOBRO 001 PESSOA DE TESTE (2).pdf")
+        self.assertEqual(first.read_bytes(), b"PDF original")
+        self.assertEqual(second.read_bytes(), b"PDF revisado")
+        self.assertEqual(len(self.store.history("001 Pessoa de Teste")), 2)
+        _, _, sanitized = self.store.save_record(self.models["retificacao"],
+            fields, [], b"PDF", "001/2026")
+        self.assertEqual(sanitized.name, "RETIFICAÇÃO 001-2026 PESSOA DE TESTE.pdf")
+
     def test_desdobro_validation_and_one_fraction(self):
         model = self.models["desdobro"]
         with self.assertRaisesRegex(ValueError, "Fração 1"):

@@ -7,31 +7,64 @@ import sys
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
+from dataclasses import astuple
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from tkinter import filedialog, messagebox, ttk
 from uuid import uuid4
 
+from .appearance import DEFAULT_THEME, PALETTES
 from .docx import export_pdf
 from .models import FRACTION_FIELDS, MAX_FRACTIONS, REQUIRED, Model, defaults, prepare
-from .storage import Storage, matches_history
+from .storage import Storage, atomic_write, matches_history, pdf_stem
 
-NAV = "#112836"
-NAV_ACTIVE = "#214552"
-BG = "#f1f5f6"
-PAPER = "#ffffff"
-INK = "#182e38"
-MUTED = "#4d656d"
-LINE = "#d5e2e5"
-ACCENT = "#076b5c"
-ACCENT_BG = "#e0f2ec"
+T = PALETTES[DEFAULT_THEME]
 FONT = "Segoe UI" if sys.platform == "win32" else "DejaVu Sans"
 
 
-def label(parent, text, size=10, *, bold=False, fg=INK, bg=PAPER, anchor="w", **kwargs):
-    return tk.Label(parent, text=text, fg=fg, bg=bg, anchor=anchor,
+def label(parent, text, size=10, *, bold=False, fg=None, bg=None, anchor="w", **kwargs):
+    return tk.Label(parent, text=text, fg=fg or T.ink, bg=bg or T.paper, anchor=anchor,
                     font=(FONT, size, "bold" if bold else "normal"), **kwargs)
 
+
+
+def workflow(parent, active):
+    strip = tk.Frame(parent, bg=T.nav, pady=9)
+    center = tk.Frame(strip, bg=T.nav)
+    center.pack()
+    for index, step in enumerate(("Preencher", "Revisar", "Arquivar"), 1):
+        if index > 1:
+            label(center, "─────", 9, fg=T.line, bg=T.nav).pack(side="left", padx=9)
+        current = index == active
+        color = T.accent if index <= active else T.muted
+        number = "✓" if index < active else f"{index:02d}"
+        label(center, f"{number}   {step}", 10, bold=current, fg=color,
+              bg=T.active if current else T.nav, padx=12, pady=6).pack(side="left")
+    return strip
+
+
+def review_details(model, fields, fractions, reference):
+    street = fields.get("LogradouroImovel")
+    address = ", ".join(filter(None, (street, fields.get("NumeroImovel"))))
+    if not address and fractions:
+        addresses = dict.fromkeys(", ".join(filter(None, (row.get("endereco"), row.get("numero"))))
+                                  for row in fractions)
+        address = "\n".join(filter(None, addresses))
+    lots = ", ".join(row["lote"] for row in fractions)
+    area = fields.get("AreaTerreno") or fields.get("AreaMensurada")
+    if fractions:
+        total = sum(Decimal(row["area"].replace(".", "").replace(",", ".")) for row in fractions)
+        area = f"{total:,.2f}".translate(str.maketrans(",.", ".,")) + " m²"
+    elif area:
+        area += " m²"
+    return [
+        ("Nº do documento", reference),
+        ("Proprietário", fields.get("NomeProprietario")),
+        ("Endereço dos lotes" if fractions and not street else "Endereço", address),
+        ("Lotes resultantes", f"{len(fractions)} · {lots}" if lots else None),
+        ("Soma das áreas dos lotes" if fractions else "Área do imóvel", area),
+    ]
 
 def open_path(path):
     if sys.platform == "win32":
@@ -58,11 +91,12 @@ def archive_directory():
 
 
 class ScrollArea(tk.Frame):
-    def __init__(self, parent):
-        super().__init__(parent, bg=BG)
-        self.canvas = tk.Canvas(self, bg=BG, highlightthickness=0)
+    def __init__(self, parent, background=None):
+        background = background or T.bg
+        super().__init__(parent, bg=background)
+        self.canvas = tk.Canvas(self, bg=background, highlightthickness=0)
         bar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.body = tk.Frame(self.canvas, bg=BG)
+        self.body = tk.Frame(self.canvas, bg=background)
         window = self.canvas.create_window(0, 0, anchor="nw", window=self.body)
         self.body.bind("<Configure>", lambda _: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(window, width=e.width))
@@ -76,7 +110,7 @@ class ScrollArea(tk.Frame):
 
 
 class Preview(tk.Toplevel):
-    def __init__(self, parent, data, title, destination, save):
+    def __init__(self, parent, data, title, destination, suggested, details, save):
         import pypdfium2
         from PIL import ImageTk
 
@@ -86,36 +120,72 @@ class Preview(tk.Toplevel):
         self.saved = None
         self.save_document = save
         self.document_title = title
+        self.zoom = 1.0
+        self.fit_job = None
         super().__init__(parent)
         self.title(f"{title} · Prévia")
         width, height = self.maxsize()
-        self.geometry(f"{min(900, width - 25)}x{min(710, height - 55)}+30+25")
-        self.minsize(550, 320)
+        self.geometry(f"{min(1130, width - 25)}x{min(760, height - 55)}+18+22")
+        self.minsize(610, 340)
         self.transient(parent)
 
-        header = tk.Frame(self, bg=PAPER, padx=16, pady=10)
+        header = tk.Frame(self, bg=T.paper, padx=18, pady=10)
         header.pack(fill="x")
-        label(header, "REVISAR DOCUMENTO", 9, bold=True, fg=ACCENT).pack(anchor="w")
-        label(header, title, 15, bold=True).pack(anchor="w", pady=(2, 0))
-        toolbar = tk.Frame(self, bg=PAPER, padx=16, pady=8)
+        label(header, "TRIBUTOS DOCS  /  REVISÃO", 9, bold=True, fg=T.accent).pack(anchor="w")
+        label(header, title, 17, bold=True).pack(anchor="w", pady=(2, 0))
+        workflow(self, 2).pack(fill="x")
+
+        toolbar = tk.Frame(self, bg=T.paper, padx=18, pady=8)
         toolbar.pack(fill="x")
         ttk.Button(toolbar, text="Voltar", command=self.close).pack(side="left")
         ttk.Button(toolbar, text="Salvar PDF", style="Accent.TButton", command=self.confirm).pack(side="right")
         ttk.Button(toolbar, text="Imprimir", command=self.print_document).pack(side="right", padx=8)
-        label(self, f"Destino do PDF  ·  {destination}", 9, fg=MUTED, padx=16, pady=7).pack(fill="x")
-        pages = tk.Frame(self, bg=PAPER, padx=16, pady=5)
-        pages.pack(fill="x")
-        self.previous = ttk.Button(pages, text="‹", width=4, command=lambda: self.show_page(-1))
-        self.previous.pack(side="left")
-        self.counter = label(pages, "", fg=MUTED, width=12, anchor="center")
-        self.counter.pack(side="left")
-        self.next = ttk.Button(pages, text="›", width=4, command=lambda: self.show_page(1))
-        self.next.pack(side="left")
         self.bind("<Control-s>", lambda _: self.confirm())
         self.bind("<Control-p>", lambda _: self.print_document())
-        body = tk.Frame(self)
+
+        content = tk.Frame(self, bg=T.bg, padx=12, pady=10)
+        content.pack(fill="both", expand=True)
+        side = tk.Frame(content, bg=T.paper, width=267, highlightbackground=T.line, highlightthickness=1)
+        side.pack(side="right", fill="y", padx=(10, 0))
+        side.pack_propagate(False)
+        label(side, "Resumo da revisão", 13, bold=True, padx=13, pady=9).pack(fill="x")
+        summary = ScrollArea(side, background=T.paper)
+        summary.pack(fill="both", expand=True, padx=9, pady=(0, 7))
+        for caption, value in details:
+            if caption == "Lotes resultantes" and not value:
+                continue
+            cell = tk.Frame(summary.body, bg=T.paper, padx=5, pady=5)
+            cell.pack(fill="x")
+            label(cell, caption, 9, fg=T.muted).pack(anchor="w")
+            label(cell, value or "Não informado", 10, bold=bool(value), wraplength=220,
+                  justify="left").pack(anchor="w", pady=(2, 0))
+            tk.Frame(summary.body, bg=T.line, height=1).pack(fill="x", padx=5)
+        label(summary.body, "ARQUIVO PDF", 8, bold=True, fg=T.accent,
+              padx=5, pady=6).pack(fill="x")
+        label(summary.body, suggested, 9, wraplength=220, padx=5, justify="left").pack(fill="x")
+        label(summary.body, str(destination), 8, fg=T.muted, wraplength=220,
+              padx=5, pady=4, justify="left").pack(fill="x")
+        for event in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.bind(event, lambda event: summary.wheel(event)
+                      if str(event.widget).startswith(str(summary)) else None, add="+")
+
+        viewer = tk.Frame(content, bg=T.paper, highlightbackground=T.line, highlightthickness=1)
+        viewer.pack(side="left", fill="both", expand=True)
+        pages = tk.Frame(viewer, bg=T.paper, padx=6, pady=4)
+        pages.pack(fill="x")
+        self.previous = ttk.Button(pages, text="<", width=3, command=lambda: self.show_page(-1))
+        self.previous.pack(side="left")
+        self.counter = label(pages, "", fg=T.muted, width=8, anchor="center")
+        self.counter.pack(side="left")
+        self.next = ttk.Button(pages, text=">", width=3, command=lambda: self.show_page(1))
+        self.next.pack(side="left")
+        ttk.Button(pages, text="+", width=3, command=lambda: self.set_zoom(1.2)).pack(side="right")
+        self.zoom_label = label(pages, "100%", 9, fg=T.muted, padx=4)
+        self.zoom_label.pack(side="right")
+        ttk.Button(pages, text="-", width=3, command=lambda: self.set_zoom(1 / 1.2)).pack(side="right")
+        body = tk.Frame(viewer, bg=T.canvas)
         body.pack(fill="both", expand=True)
-        self.canvas = tk.Canvas(body, bg="#dbe4e6", highlightthickness=0)
+        self.canvas = tk.Canvas(body, bg=T.canvas, highlightthickness=0)
         ybar = ttk.Scrollbar(body, command=self.canvas.yview)
         xbar = ttk.Scrollbar(body, orient="horizontal", command=self.canvas.xview)
         self.canvas.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
@@ -124,26 +194,44 @@ class Preview(tk.Toplevel):
         self.canvas.grid(row=0, column=0, sticky="nsew")
         ybar.grid(row=0, column=1, sticky="ns")
         xbar.grid(row=1, column=0, sticky="ew")
+        self.canvas.bind("<Configure>", self.resize_preview)
         self.canvas.bind("<MouseWheel>", lambda e: self.canvas.yview_scroll(-int(e.delta / 120) * 3, "units"))
         self.canvas.bind("<Button-4>", lambda e: self.canvas.yview_scroll(-3, "units"))
         self.canvas.bind("<Button-5>", lambda e: self.canvas.yview_scroll(3, "units"))
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.bind("<Escape>", lambda _: self.close())
         try:
+            self.update_idletasks()
             self.show_page(0)
         except Exception:
             self.close()
             raise
         self.grab_set()
 
-    def show_page(self, offset):
+    def resize_preview(self, _):
+        if self.fit_job is not None:
+            self.after_cancel(self.fit_job)
+        self.fit_job = self.after(130, self.render_resize)
+
+    def render_resize(self):
+        self.fit_job = None
+        self.show_page(0, reset_scroll=False)
+
+    def set_zoom(self, factor):
+        self.zoom = min(3.0, max(0.55, self.zoom * factor))
+        self.zoom_label.configure(text=f"{self.zoom:.0%}")
+        self.show_page(0, reset_scroll=False)
+
+    def show_page(self, offset, reset_scroll=True):
         target = self.index + offset
         if not 0 <= target < len(self.pdf):
             return
         self.index = target
         page = self.pdf[self.index]
         try:
-            bitmap = page.render(scale=min(1.3, 1000 / max(page.get_size())))
+            w, h = page.get_size()
+            available = max(100, self.canvas.winfo_width() - 32)
+            bitmap = page.render(scale=min(available * self.zoom / w, 2100 / max(w, h)))
             try:
                 self.photo = self.image_tk.PhotoImage(bitmap.to_pil().copy(), master=self)
             finally:
@@ -151,9 +239,12 @@ class Preview(tk.Toplevel):
         finally:
             page.close()
         self.canvas.delete("all")
-        self.canvas.create_image(12, 12, anchor="nw", image=self.photo)
-        self.canvas.configure(scrollregion=(0, 0, self.photo.width() + 24, self.photo.height() + 24))
-        self.canvas.yview_moveto(0)
+        area = max(self.canvas.winfo_width(), self.photo.width() + 24)
+        self.canvas.create_image((area - self.photo.width()) // 2, 12, anchor="nw", image=self.photo)
+        self.canvas.configure(scrollregion=(0, 0, area, self.photo.height() + 24))
+        if reset_scroll:
+            self.canvas.yview_moveto(0)
+            self.canvas.xview_moveto(0)
         self.counter.configure(text=f"{self.index + 1} de {len(self.pdf)}")
         self.previous.state(["disabled"] if self.index == 0 else ["!disabled"])
         self.next.state(["disabled"] if self.index + 1 == len(self.pdf) else ["!disabled"])
@@ -178,27 +269,41 @@ class Preview(tk.Toplevel):
             messagebox.showerror("Impressão", str(exc), parent=self)
 
     def close(self):
+        if self.fit_job is not None:
+            self.after_cancel(self.fit_job)
         self.pdf.close()
         self.destroy()
 
 
 class App:
     def __init__(self, root, store):
+        global T
         self.root = root
         self.store = store
+        self.settings_path = store.root / "appearance.json"
+        try:
+            theme = json.loads(self.settings_path.read_text(encoding="utf-8"))["theme"]
+            self.theme = theme if theme in PALETTES else DEFAULT_THEME
+        except (OSError, ValueError, KeyError, TypeError):
+            self.theme = DEFAULT_THEME
+        T = PALETTES[self.theme]
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.busy = False
         self.scroll = None
         self.nav_buttons = {}
         self.root.title("Tributos Docs | Prefeitura Municipal de Biquinhas")
-        self.root.configure(bg=BG)
-        self.root.geometry("1190x790")
-        self.root.minsize(930, 650)
+        self.root.configure(bg=T.bg)
+        width, height = self.root.maxsize()
+        self.root.geometry(f"{min(1190, width - 24)}x{min(770, height - 38)}+12+12")
+        self.root.minsize(785, 530)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.style()
-        self.sidebar()
-        self.main = tk.Frame(root, bg=BG)
-        self.main.pack(side="left", fill="both", expand=True)
+        self.topbar()
+        footer = tk.Frame(root, bg=T.nav, padx=24, pady=6)
+        footer.pack(side="bottom", fill="x")
+        label(footer, "Desenvolvido por Lucas Cézar", 9, fg=T.muted, bg=T.nav).pack(side="right")
+        self.main = tk.Frame(root, bg=T.bg)
+        self.main.pack(fill="both", expand=True)
         for event in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             self.root.bind(event, self.wheel)
         self.dashboard()
@@ -206,41 +311,118 @@ class App:
     def style(self):
         style = ttk.Style(self.root)
         style.theme_use("clam")
-        style.configure(".", font=(FONT, 10), foreground=INK)
-        style.configure("TButton", padding=(12, 7), background=PAPER, bordercolor=LINE, focuscolor=ACCENT)
-        style.map("TButton", background=[("active", ACCENT_BG)])
-        style.configure("Accent.TButton", background=ACCENT, foreground=PAPER, bordercolor=ACCENT)
-        style.map("Accent.TButton", background=[("disabled", "#6d8883"), ("active", "#07574c")],
-                  foreground=[("disabled", PAPER), ("active", PAPER)])
-        style.configure("TEntry", padding=(8, 6), fieldbackground="#fbfdfd", bordercolor=LINE)
-        style.configure("TSpinbox", padding=(8, 6), fieldbackground="#fbfdfd", bordercolor=LINE)
-        style.configure("Treeview", rowheight=35, background=PAPER, fieldbackground=PAPER, bordercolor=LINE)
-        style.configure("Treeview.Heading", padding=(8, 9), background="#e8eff1", font=(FONT, 9, "bold"))
-        style.map("Treeview", background=[("selected", NAV_ACTIVE)], foreground=[("selected", PAPER)])
+        style.configure(".", font=(FONT, 10), foreground=T.ink)
+        style.configure("TButton", padding=(13, 8), background=T.paper, bordercolor=T.line, focuscolor=T.accent)
+        style.configure("Nav.TButton", background=T.nav, bordercolor=T.nav, padding=(12, 8))
+        style.configure("Selected.Nav.TButton", background=T.active, bordercolor=T.active, foreground=T.accent, font=(FONT, 10, "bold"))
+        style.map("TButton", background=[("active", T.tint)])
+        style.configure("Accent.TButton", background=T.accent, foreground="#ffffff", bordercolor=T.accent)
+        style.map("Accent.TButton", background=[("disabled", T.muted), ("active", T.hover)],
+                  foreground=[("disabled", "#ffffff"), ("active", "#ffffff")])
+        style.configure("TEntry", padding=(8, 6), fieldbackground=T.paper, bordercolor=T.line)
+        style.configure("TSpinbox", padding=(8, 6), fieldbackground=T.paper, bordercolor=T.line)
+        style.configure("TRadiobutton", background=T.paper, foreground=T.ink)
+        style.map("TRadiobutton", background=[("active", T.tint)])
+        style.configure("Treeview", rowheight=35, background=T.paper, fieldbackground=T.paper, bordercolor=T.line)
+        style.configure("Treeview.Heading", padding=(8, 9), background=T.tint, font=(FONT, 9, "bold"))
+        style.map("Treeview", background=[("selected", T.active)], foreground=[("selected", T.ink)])
 
-    def sidebar(self):
-        side = tk.Frame(self.root, width=225, bg=NAV)
-        side.pack(side="left", fill="y")
-        side.pack_propagate(False)
-        mark = label(side, "TD", 13, bold=True, fg=PAPER, bg=ACCENT, padx=11, pady=7)
-        mark.pack(anchor="w", padx=20, pady=(26, 9))
-        label(side, "Tributos Docs", 17, bold=True, fg=PAPER, bg=NAV).pack(anchor="w", padx=20)
-        label(side, "PREFEITURA DE BIQUINHAS", 8, bold=True, fg="#a7c3cb", bg=NAV).pack(anchor="w", padx=20, pady=(5, 30))
-        label(side, "ÁREA DE TRABALHO", 8, bold=True, fg="#a7c3cb", bg=NAV).pack(anchor="w", padx=20, pady=(0, 10))
-        links = [("Início", self.dashboard), ("Novo documento", self.catalog),
-                 ("Histórico", self.history), ("Modelos Word", self.models),
-                 ("Backup e dados", self.backups)]
-        for index, (name, action) in enumerate(links, 1):
-            button = tk.Button(side, text=f"{index:02d}    {name}", anchor="w", padx=13, pady=10,
-                               bg=NAV, fg=PAPER, activebackground=NAV_ACTIVE, activeforeground=PAPER,
-                               font=(FONT, 10), relief="flat", highlightthickness=0,
-                               command=lambda callback=action: self.navigate(callback))
-            button.pack(fill="x", padx=11, pady=2)
+    def topbar(self):
+        header = tk.Frame(self.root, bg=T.paper, padx=24, pady=9)
+        header.pack(fill="x")
+        logo = Path(__file__).with_name("assets") / "municipio.png"
+        self.logo = tk.PhotoImage(file=str(logo))
+        tk.Label(header, image=self.logo, bg=T.paper).pack(side="left", padx=(0, 9))
+        brand = tk.Frame(header, bg=T.paper)
+        brand.pack(side="left")
+        label(brand, "Tributos Docs", 18, bold=True).pack(anchor="w")
+        label(brand, "PREFEITURA DE BIQUINHAS", 8, fg=T.muted).pack(anchor="w")
+        ttk.Button(header, text="⚙  Configurações", command=self.settings).pack(side="right")
+
+        nav = tk.Frame(self.root, bg=T.nav, padx=22, pady=5)
+        nav.pack(fill="x")
+        links = [("Início", self.dashboard),
+                 ("Desdobro", lambda: self.open_kind("desdobro")),
+                 ("Retificação", lambda: self.open_kind("retificacao")),
+                 ("Avaliação", lambda: self.open_kind("avaliacao")),
+                 ("Histórico", self.history)]
+        for name, action in links:
+            button = ttk.Button(nav, text=name, style="Nav.TButton",
+                                command=lambda action=action: self.navigate(action))
+            button.pack(side="left", padx=(0, 4))
             self.nav_buttons[name] = button
-        bottom = tk.Frame(side, bg=NAV)
-        bottom.pack(side="bottom", fill="x", padx=20, pady=20)
-        label(bottom, "●  Operação local", 9, bold=True, fg="#9ee0c7", bg=NAV).pack(anchor="w")
-        label(bottom, "Setor de Tributos e Arrecadação", 8, fg="#a7c3cb", bg=NAV, wraplength=176, justify="left").pack(anchor="w", pady=(5, 0))
+        ttk.Button(nav, text="Modelos e dados ▾", style="Nav.TButton", command=self.utility_menu).pack(side="right")
+        tk.Frame(self.root, bg=T.line, height=1).pack(fill="x")
+
+    def open_kind(self, kind):
+        model = next((model for model in self.store.models() if model.kind == kind), None)
+        self.form(model) if model else self.catalog()
+
+    def utility_menu(self):
+        if self.busy:
+            return
+        menu = tk.Menu(self.root, tearoff=False)
+        menu.add_command(label="Modelos Word", command=self.models)
+        menu.add_command(label="Backup e dados", command=self.backups)
+        menu.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
+
+    def settings(self):
+        if self.busy:
+            return
+        dialog = tk.Toplevel(self.root, bg=T.paper)
+        dialog.title("Configurações")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        body = tk.Frame(dialog, bg=T.paper, padx=21, pady=17)
+        body.pack(fill="both", expand=True)
+        label(body, "Aparência do sistema", 15, bold=True).pack(anchor="w")
+        label(body, "Escolha uma paleta para esta estação.", 10, fg=T.muted).pack(anchor="w", pady=(3, 12))
+        selection = tk.StringVar(value=self.theme)
+        for key, choice in PALETTES.items():
+            row = tk.Frame(body, bg=T.paper)
+            row.pack(fill="x", pady=3)
+            ttk.Radiobutton(row, text=choice.name, value=key, variable=selection, width=21).pack(side="left")
+            for color in (choice.bg, choice.active, choice.accent):
+                tk.Frame(row, width=19, height=17, bg=color,
+                         highlightbackground=T.line, highlightthickness=1).pack(side="left", padx=2)
+        actions = tk.Frame(body, bg=T.paper)
+        actions.pack(fill="x", pady=(13, 0))
+
+        def apply():
+            try:
+                atomic_write(self.settings_path, json.dumps({"theme": selection.get()}).encode("utf-8"))
+            except OSError as exc:
+                self.error(exc, dialog)
+                return
+            dialog.destroy()
+            self.change_theme(selection.get())
+
+        ttk.Button(actions, text="Aplicar", style="Accent.TButton", command=apply).pack(side="right")
+        ttk.Button(actions, text="Cancelar", command=dialog.destroy).pack(side="right", padx=8)
+        dialog.bind("<Escape>", lambda _: dialog.destroy())
+        dialog.wait_visibility()
+        dialog.grab_set()
+
+    def change_theme(self, key):
+        global T
+        old = T
+        self.theme = key
+        T = PALETTES[key]
+        colors = dict(zip(astuple(old)[1:], astuple(T)[1:]))
+
+        def recolor(widget):
+            if not isinstance(widget, ttk.Widget):
+                options = widget.keys()
+                for option in ("background", "foreground", "highlightbackground"):
+                    if option in options:
+                        current = str(widget.cget(option))
+                        if current in colors:
+                            widget.configure({option: colors[current]})
+            for child in widget.winfo_children():
+                recolor(child)
+
+        recolor(self.root)
+        self.style()
 
     def navigate(self, action):
         if not self.busy:
@@ -255,13 +437,13 @@ class App:
             child.destroy()
         self.scroll = None
         for name, button in self.nav_buttons.items():
-            button.configure(bg=NAV_ACTIVE if name == active else NAV)
-        header = tk.Frame(self.main, bg=PAPER, padx=27, pady=16)
+            button.configure(style="Selected.Nav.TButton" if name == active else "Nav.TButton")
+        header = tk.Frame(self.main, bg=T.paper, padx=27, pady=16)
         header.pack(fill="x")
-        label(header, kicker.upper(), 8, bold=True, fg=ACCENT).pack(anchor="w")
+        label(header, kicker.upper(), 8, bold=True, fg=T.accent).pack(anchor="w")
         label(header, title, 22, bold=True).pack(anchor="w", pady=(4, 3))
-        label(header, description, 10, fg=MUTED, wraplength=655, justify="left").pack(anchor="w")
-        tk.Frame(self.main, bg=LINE, height=1).pack(fill="x")
+        label(header, description, 10, fg=T.muted, wraplength=655, justify="left").pack(anchor="w")
+        tk.Frame(self.main, bg=T.line, height=1).pack(fill="x")
 
     def scroll_page(self):
         self.scroll = ScrollArea(self.main)
@@ -269,24 +451,39 @@ class App:
         return self.scroll.body
 
     def card(self, parent, title, note=""):
-        box = tk.Frame(parent, bg=PAPER, highlightbackground=LINE, highlightthickness=1, padx=16, pady=13)
+        box = tk.Frame(parent, bg=T.paper, highlightbackground=T.line, highlightthickness=1, padx=16, pady=13)
         box.pack(fill="x", padx=(0, 10), pady=(0, 11))
         label(box, title, 12, bold=True).pack(anchor="w")
         if note:
-            label(box, note, fg=MUTED, wraplength=630, justify="left").pack(anchor="w", pady=(4, 8))
+            label(box, note, fg=T.muted, wraplength=630, justify="left").pack(anchor="w", pady=(4, 8))
         return box
 
     def dashboard(self):
         self.page("Início", "Painel inicial", "Documentos municipais",
                   "Preencha um modelo, confira o PDF e arquive o documento na mesma estação.")
         body = self.scroll_page()
-        summary = tk.Frame(body, bg=ACCENT_BG, padx=18, pady=17)
-        summary.pack(fill="x", padx=(0, 10), pady=(0, 14))
-        label(summary, "EMISSÃO DE DOCUMENTOS", 9, bold=True, fg=ACCENT, bg=ACCENT_BG).pack(anchor="w")
-        label(summary, f"{self.store.model_count()} modelos ativos",
-              14, bold=True, bg=ACCENT_BG).pack(anchor="w", pady=(5, 11))
-        ttk.Button(summary, text="Novo documento", style="Accent.TButton", command=self.catalog).pack(anchor="w")
-        box = self.card(body, "Arquivo de documentos", "Consulte os PDFs que estão nas pastas de trabalho.")
+        heading = tk.Frame(body, bg=T.bg)
+        heading.pack(fill="x", padx=(0, 10), pady=(5, 12))
+        label(heading, "Começar um documento", 16, bold=True, bg=T.bg).pack(side="left")
+        ttk.Button(heading, text="Todos os modelos", command=self.catalog).pack(side="right")
+        quick = tk.Frame(body, bg=T.bg)
+        quick.pack(fill="x", padx=(0, 10), pady=(0, 16))
+        for index, (key, title, description) in enumerate((
+            ("desdobro", "Desdobro", "Identifique o imóvel e os lotes resultantes."),
+            ("retificacao", "Retificação", "Registre os dados da área retificada."),
+            ("avaliacao", "Avaliação", "Preencha os dados e o valor do imóvel."),
+        )):
+            quick.columnconfigure(index, weight=1, uniform="document")
+            tile = tk.Frame(quick, bg=T.paper, highlightbackground=T.line, highlightthickness=1,
+                            padx=15, pady=13)
+            tile.grid(row=0, column=index, sticky="nsew", padx=(0, 8) if index < 2 else 0)
+            label(tile, f"0{index + 1}", 9, bold=True, fg=T.accent, bg=T.tint,
+                  padx=8, pady=4).pack(anchor="w")
+            label(tile, title, 14, bold=True).pack(anchor="w", pady=(8, 3))
+            label(tile, description, 9, fg=T.muted, wraplength=185,
+                  justify="left").pack(anchor="w", pady=(0, 10))
+            ttk.Button(tile, text="Preencher  ›", command=lambda key=key: self.open_kind(key)).pack(anchor="w")
+        box = self.card(body, "Arquivo de documentos", "Consulte e abra os PDFs que estão nas pastas de trabalho.")
         ttk.Button(box, text="Consultar histórico", command=self.history).pack(anchor="w", pady=(8, 0))
 
     def catalog(self):
@@ -306,11 +503,13 @@ class App:
 
     def form(self, model, previous=None):
         record_id = previous["record_id"] if previous else None
-        self.page("Novo documento", "Revisão do histórico" if record_id else "Preenchimento",
-                  model.title, "Os campos com * são obrigatórios. Confira o PDF antes de salvar.")
-        footer = tk.Frame(self.main, bg=PAPER, padx=26, pady=10)
+        active = {"desdobro": "Desdobro", "retificacao": "Retificação", "avaliacao": "Avaliação"}.get(model.kind)
+        self.page(active, "Emissão de documentos", model.title,
+                  "Os campos com * são obrigatórios. Confira o PDF antes de salvar.")
+        workflow(self.main, 1).pack(fill="x")
+        footer = tk.Frame(self.main, bg=T.paper, padx=26, pady=10)
         footer.pack(side="bottom", fill="x")
-        self.form_status = label(footer, "", fg=MUTED)
+        self.form_status = label(footer, "", fg=T.muted)
         self.form_status.pack(side="left")
         body = self.scroll_page()
         values = json.loads(previous["form"]) if previous else defaults()
@@ -318,12 +517,14 @@ class App:
         reference = tk.StringVar(value=previous["reference"] if previous else "")
         groups = model.groups()
         if not any("NumeroDocumento" in group for group in groups.values()):
-            box = self.card(body, "Identificação no histórico")
-            label(box, "Número ou referência do processo (opcional)", fg=MUTED).pack(anchor="w", pady=(6, 4))
+            box = self.card(body, "Identificação do documento")
+            label(box, "Número do documento (opcional)", fg=T.muted).pack(anchor="w", pady=(6, 4))
+            label(box, "Exemplo: 001. O número informado aparece no nome do PDF.", 9,
+                  fg=T.muted).pack(anchor="w", pady=(0, 6))
             ttk.Entry(box, textvariable=reference, width=36).pack(anchor="w")
         for group, fields in groups.items():
             box = self.card(body, "Imóvel de origem" if group == "Imóvel" and model.kind == "desdobro" else group)
-            grid = tk.Frame(box, bg=PAPER)
+            grid = tk.Frame(box, bg=T.paper)
             grid.pack(fill="x", pady=(7, 0))
             for col in range(3):
                 grid.columnconfigure(col, weight=1, uniform="form")
@@ -331,7 +532,7 @@ class App:
                 row, col = divmod(index, 3)
                 variable = tk.StringVar(value=values.get(key, ""))
                 self.form_vars[key] = variable
-                cell = tk.Frame(grid, bg=PAPER)
+                cell = tk.Frame(grid, bg=T.paper)
                 cell.grid(row=row, column=col, sticky="ew", padx=(0, 11), pady=(0, 8))
                 if key == "LogradouroImovel" and model.kind == "retificacao":
                     caption = "Nome da rua"
@@ -343,11 +544,11 @@ class App:
         if model.has_fractions():
             rows = json.loads(previous["fractions"]) if previous else [{}, {}]
             box = self.card(body, "Frações resultantes", "Informe a quantidade e preencha o lote, a área e o endereço de cada fração.")
-            controls = tk.Frame(box, bg=PAPER)
+            controls = tk.Frame(box, bg=T.paper)
             controls.pack(fill="x", pady=(2, 10))
             label(controls, "Quantidade de frações", 9, bold=True).pack(side="left")
             self.count = tk.StringVar(value=str(len(rows)))
-            self.fraction_table = tk.Frame(box, bg=PAPER)
+            self.fraction_table = tk.Frame(box, bg=T.paper)
             spin = ttk.Spinbox(controls, from_=1, to=MAX_FRACTIONS, width=5, textvariable=self.count)
             spin.pack(side="left", padx=8)
             self.count.trace_add("write", self.update_fractions)
@@ -355,7 +556,7 @@ class App:
                 self.fraction_vars.append({key: tk.StringVar(value=row.get(key, "")) for key in FRACTION_FIELDS})
             self.fraction_table.pack(fill="x")
             self.update_fractions()
-        self.generate_button = ttk.Button(footer, text="Gerar documento", style="Accent.TButton",
+        self.generate_button = ttk.Button(footer, text="Revisar documento  ›", style="Accent.TButton",
             command=lambda: self.generate(model, reference.get(), record_id))
         self.generate_button.pack(side="right")
         ttk.Button(footer, text="Voltar", command=lambda: self.navigate(self.history if record_id else self.catalog)).pack(side="right", padx=8)
@@ -373,11 +574,11 @@ class App:
         for col, caption in enumerate(["#", *FRACTION_FIELDS.values()]):
             if col:
                 self.fraction_table.columnconfigure(col, weight=2 if col == 3 else 1, uniform="fractions")
-            label(self.fraction_table, caption, 9, bold=True, bg=BG, padx=6, pady=4).grid(row=0, column=col, sticky="ew")
+            label(self.fraction_table, caption, 9, bold=True, bg=T.bg, padx=6, pady=4).grid(row=0, column=col, sticky="ew")
         while len(self.fraction_vars) < quantity:
             self.fraction_vars.append({key: tk.StringVar() for key in FRACTION_FIELDS})
         for index, variables in enumerate(self.fraction_vars[:quantity], 1):
-            label(self.fraction_table, f"{index:02d}", 9, bold=True, fg=ACCENT, padx=6).grid(row=index, column=0, sticky="w")
+            label(self.fraction_table, f"{index:02d}", 9, bold=True, fg=T.accent, padx=6).grid(row=index, column=0, sticky="w")
             for col, variable in enumerate(variables.values(), 1):
                 ttk.Entry(self.fraction_table, textvariable=variable, width=8).grid(row=index, column=col, sticky="ew", padx=3, pady=3)
 
@@ -403,17 +604,20 @@ class App:
             try:
                 data = future.result()
                 self.form_status.configure(text="Prévia pronta para conferência.")
-                def archive():
-                    return self.store.save_record(
-                        model, values, fractions, data, values.get("NumeroDocumento", reference).strip(), record_id)
+                number = values.get("NumeroDocumento", reference).strip()
+                owner = values.get("NomeProprietario", "")
+                stem = pdf_stem(model.kind, model.title, number, owner, record_id)
 
-                preview = Preview(self.root, data, model.title, self.store.destination(model.kind), archive)
+                def archive():
+                    return self.store.save_record(model, values, fractions, data, number, record_id)
+
+                preview = Preview(self.root, data, model.title, self.store.destination(model.kind),
+                                  f"{stem}.pdf" if number else "PDF com número automático",
+                                  review_details(model, values, fractions, number), archive)
                 self.root.wait_window(preview)
                 if preview.saved:
                     rid, version, path = preview.saved
-                    self.history()
-                    messagebox.showinfo("PDF salvo", f"TD-{rid:06d} · revisão {version:02d}\n\n{path}",
-                                        parent=self.root)
+                    self.archive_done(rid, version, path)
             except Exception as exc:
                 self.error(exc)
             finally:
@@ -423,20 +627,34 @@ class App:
                     self.form_status.configure(text="")
         self.root.after(90, complete)
 
+    def archive_done(self, record, version, path):
+        self.page(None, "Emissão de documentos", "PDF arquivado",
+                  "O documento está disponível no histórico e na pasta da categoria.")
+        workflow(self.main, 3).pack(fill="x")
+        body = self.scroll_page()
+        card = self.card(body, path.name, f"TD-{record:06d} · revisão {version:02d}\n{path.parent}")
+        row = tk.Frame(card, bg=T.paper)
+        row.pack(fill="x")
+        ttk.Button(row, text="Abrir PDF", style="Accent.TButton",
+                   command=lambda: self.safe(lambda: open_path(path))).pack(side="left")
+        ttk.Button(row, text="Abrir pasta", command=lambda: self.safe(
+            lambda: open_path(path.parent))).pack(side="left", padx=8)
+        ttk.Button(row, text="Ver histórico", command=self.history).pack(side="left")
+
     def history(self):
         self.page("Histórico", "Arquivo local", "Histórico de documentos",
                   "PDFs encontrados nas pastas do repositório. Pesquise pelo nome do arquivo, tipo, proprietário ou referência.")
-        body = tk.Frame(self.main, bg=BG, padx=26, pady=16)
+        body = tk.Frame(self.main, bg=T.bg, padx=26, pady=16)
         body.pack(fill="both", expand=True)
         query = tk.StringVar()
-        searchbar = tk.Frame(body, bg=BG)
+        searchbar = tk.Frame(body, bg=T.bg)
         searchbar.pack(fill="x", pady=(0, 10))
-        label(searchbar, "Pesquisar", 9, bold=True, bg=BG).pack(side="left")
+        label(searchbar, "Pesquisar", 9, bold=True, bg=T.bg).pack(side="left")
         ttk.Entry(searchbar, textvariable=query, width=35).pack(side="left", padx=8)
         ttk.Button(searchbar, text="Abrir pastas", command=lambda: self.safe(
             lambda: open_path(self.store.archive))).pack(side="right")
         ttk.Button(searchbar, text="Atualizar", command=lambda: reload_archive()).pack(side="right", padx=5)
-        panel = tk.Frame(body, bg=BG)
+        panel = tk.Frame(body, bg=T.bg)
         panel.pack(fill="both", expand=True)
         columns = [("code", "Código / rev.", 121), ("reference", "Nº / referência", 113),
                    ("owner", "Proprietário", 166), ("model", "Arquivo / tipo", 210), ("date", "Emissão", 100)]
@@ -448,7 +666,7 @@ class App:
         for key, heading, width in columns:
             table.heading(key, text=heading, anchor="w")
             table.column(key, width=width, minwidth=70, stretch=key in {"owner", "model"})
-        status = label(body, "", fg=MUTED, bg=BG)
+        status = label(body, "", fg=T.muted, bg=T.bg)
         status.pack(anchor="w", pady=(8, 0))
 
         rows, documents = {}, []
@@ -502,7 +720,7 @@ class App:
 
         query.trace_add("write", refresh)
         table.bind("<Double-1>", lambda _: selected(show_pdf))
-        actions = tk.Frame(body, bg=BG)
+        actions = tk.Frame(body, bg=T.bg)
         actions.pack(fill="x", pady=(10, 0))
         ttk.Button(actions, text="Abrir PDF", command=lambda: selected(show_pdf)).pack(side="left")
         ttk.Button(actions, text="Corrigir e gerar nova revisão", style="Accent.TButton",
@@ -513,13 +731,13 @@ class App:
         self.page("Modelos Word", "Gerenciamento", "Modelos Word",
                   "Edite o texto no Word ou Writer. As chaves entre < e > criam campos no formulário.")
         body = self.scroll_page()
-        action = tk.Frame(body, bg=BG)
+        action = tk.Frame(body, bg=T.bg)
         action.pack(fill="x", padx=(0, 10), pady=(0, 10))
         ttk.Button(action, text="Cadastrar modelo .docx", style="Accent.TButton",
                    command=lambda: self.model_editor()).pack(side="left")
         for model in self.store.models():
             box = self.card(body, model.title, f"{len(model.keys())} chaves · arquivo Word editável")
-            row = tk.Frame(box, bg=PAPER)
+            row = tk.Frame(box, bg=T.paper)
             row.pack(fill="x")
             ttk.Button(row, text="Alterar modelo", command=lambda m=model: self.model_editor(m)).pack(side="left")
             ttk.Button(row, text="Excluir", command=lambda m=model: self.delete_model(m)).pack(side="left", padx=8)
@@ -540,14 +758,14 @@ class App:
         dialog.minsize(560, 410)
         dialog.transient(self.root)
         dialog.grab_set()
-        frame = tk.Frame(dialog, bg=PAPER, padx=20, pady=16)
+        frame = tk.Frame(dialog, bg=T.paper, padx=20, pady=16)
         frame.pack(fill="both", expand=True)
         label(frame, "Modelo do documento", 15, bold=True).pack(anchor="w")
         label(frame, "Nome do modelo", 9, bold=True).pack(anchor="w", pady=(12, 4))
         title = tk.StringVar(value=model.title if model else "")
         ttk.Entry(frame, textvariable=title).pack(fill="x")
         label(frame, "Edite frases e formatação no Word ou Writer. Para criar um campo, digite uma chave como <CimImovel>.",
-              fg=MUTED, wraplength=530, justify="left").pack(anchor="w", pady=(10, 6))
+              fg=T.muted, wraplength=530, justify="left").pack(anchor="w", pady=(10, 6))
         working = TemporaryDirectory(prefix="modelo-", dir=self.store.root, ignore_cleanup_errors=True)
         editable = Path(working.name) / "Modelo.docx"
         if model:
@@ -559,14 +777,14 @@ class App:
             dialog.destroy()
 
         dialog.protocol("WM_DELETE_WINDOW", close)
-        box = tk.Frame(frame, bg=PAPER)
+        box = tk.Frame(frame, bg=T.paper)
         box.pack(fill="x")
-        status = label(frame, "", fg=MUTED, wraplength=530, justify="left")
-        footer = tk.Frame(frame, bg=PAPER)
+        status = label(frame, "", fg=T.muted, wraplength=530, justify="left")
+        footer = tk.Frame(frame, bg=T.paper)
         footer.pack(side="bottom", fill="x", pady=(8, 0))
-        listframe = tk.Frame(frame, bg=PAPER)
-        keys = tk.Listbox(listframe, height=7, bg="#f5f9fa", fg=INK, relief="flat",
-                          highlightthickness=1, highlightbackground=LINE, exportselection=False, font=(FONT, 10))
+        listframe = tk.Frame(frame, bg=T.paper)
+        keys = tk.Listbox(listframe, height=7, bg="#f5f9fa", fg=T.ink, relief="flat",
+                          highlightthickness=1, highlightbackground=T.line, exportselection=False, font=(FONT, 10))
         bar = ttk.Scrollbar(listframe, command=keys.yview)
         bar.pack(side="right", fill="y")
         keys.configure(yscrollcommand=bar.set)
