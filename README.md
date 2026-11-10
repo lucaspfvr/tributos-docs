@@ -2,9 +2,9 @@
 
 Automação de processos documentais para o setor de tributos.
 
-## Etapa 00
+## Etapa 01
 
-Janela desktop em Python e Tkinter.
+Formulário de avaliação e substituição de chaves em um DOCX.
 
 Esta é uma etapa da reconstrução incremental do projeto. Os documentos de exemplo são demonstrativos e sem validade.
 
@@ -13,5 +13,7 @@ Esta é uma etapa da reconstrução incremental do projeto. Os documentos de exe
 Com Python 3.12 instalado, abra o PowerShell nesta pasta.
 
 ```powershell
-py -3.12 app.py
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe app.py
 ```
