@@ -11,8 +11,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from zipfile import BadZipFile, ZipFile, ZIP_DEFLATED
 
-from lxml import etree
-
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 KEY = re.compile(r"<([A-Za-z][A-Za-z0-9_]{0,63})>")
@@ -47,6 +45,8 @@ try {
 
 
 def xml(data):
+    from lxml import etree
+
     return etree.fromstring(data, etree.XMLParser(resolve_entities=False, no_network=True))
 
 
@@ -72,6 +72,8 @@ def segments(paragraph):
 
 
 def set_text(node, value):
+    from lxml import etree
+
     lines = value.split("\n")
     node.set(SPACE, "preserve")
     node.text = lines[0]
@@ -135,6 +137,8 @@ def write_package(entries):
 
 
 def replace_tags(data, values=None):
+    from lxml import etree
+
     entries = read_package(data)
     keys = {}
     for name, content in list(entries.items()):

@@ -111,6 +111,34 @@ class ProjectTest(unittest.TestCase):
         row = other.record(rid, v2)
         self.assertEqual(other.ensure_pdf(row["file"], row["pdf"]).read_bytes(), b"test pdf 2")
 
+    def test_history_follows_files_and_retains_legacy_metadata(self):
+        model = self.models["desdobro"]
+        record_id, version, pdf = self.store.save_record(
+            model, self.fields, self.fractions, b"%PDF-old", "REF-100")
+        self.assertEqual(pdf.parent.name, "DESDOBRO")
+
+        # Simulate an installation with the prior database and disk layout.
+        pdf.unlink()
+        record = self.store.record(record_id, version)
+        old = self.root / "Documentos" / record["file"]
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b"%PDF-old")
+        with self.store.connection:
+            self.store.connection.execute("DELETE FROM settings")
+        migrated, = self.store.history("REF-100")
+        self.assertEqual(migrated["path"], pdf)
+        self.assertEqual(pdf.read_bytes(), b"%PDF-old")
+        self.assertTrue(old.exists())
+
+        manual = self.store.archive / "RETIFICAÇÃO" / "Retificação da Praça.PDF"
+        manual.write_bytes(b"%PDF-manual")
+        match, = self.store.history("retificacao da praca")
+        self.assertEqual(match["path"], manual)
+        self.assertIsNone(match["record_id"])
+        pdf.unlink()
+        self.assertEqual(self.store.history("REF-100"), [])
+        self.assertFalse(pdf.exists())
+
     def test_desdobro_validation_and_one_fraction(self):
         model = self.models["desdobro"]
         with self.assertRaisesRegex(ValueError, "Fração 1"):

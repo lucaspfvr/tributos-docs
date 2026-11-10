@@ -12,12 +12,9 @@ from tempfile import TemporaryDirectory
 from tkinter import filedialog, messagebox, ttk
 from uuid import uuid4
 
-import pypdfium2 as pdfium
-from PIL import ImageTk
-
 from .docx import export_pdf
 from .models import FRACTION_FIELDS, MAX_FRACTIONS, REQUIRED, Model, defaults, prepare
-from .storage import Storage
+from .storage import Storage, matches_history
 
 NAV = "#112836"
 NAV_ACTIVE = "#214552"
@@ -52,6 +49,14 @@ def data_directory():
     return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "tributos-docs"
 
 
+def archive_directory():
+    custom = os.environ.get("TRIBUTOS_DOCS_ARCHIVE")
+    if custom:
+        return Path(custom).expanduser()
+    folder = "Documents" if sys.platform == "win32" else "Documentos"
+    return Path.home() / folder / "Tributos Docs"
+
+
 class ScrollArea(tk.Frame):
     def __init__(self, parent):
         super().__init__(parent, bg=BG)
@@ -71,26 +76,43 @@ class ScrollArea(tk.Frame):
 
 
 class Preview(tk.Toplevel):
-    def __init__(self, parent, data):
-        self.pdf = pdfium.PdfDocument(data)
+    def __init__(self, parent, data, title, destination, save):
+        import pypdfium2
+        from PIL import ImageTk
+
+        self.pdf = pypdfium2.PdfDocument(data)
+        self.image_tk = ImageTk
         self.index = 0
-        self.confirmed = False
+        self.saved = None
+        self.save_document = save
+        self.document_title = title
         super().__init__(parent)
-        self.title("Prévia do documento • Tributos Docs")
-        self.geometry("850x740")
-        self.minsize(600, 480)
+        self.title(f"{title} · Prévia")
+        width, height = self.maxsize()
+        self.geometry(f"{min(900, width - 25)}x{min(710, height - 55)}+30+25")
+        self.minsize(550, 320)
         self.transient(parent)
-        header = tk.Frame(self, bg=PAPER, padx=20, pady=13)
+
+        header = tk.Frame(self, bg=PAPER, padx=16, pady=10)
         header.pack(fill="x")
-        label(header, "Prévia do documento", 15, bold=True).pack(side="left")
-        ttk.Button(header, text="Próxima", command=lambda: self.show_page(1)).pack(side="right")
-        self.counter = label(header, "", fg=MUTED, width=14, anchor="center")
-        self.counter.pack(side="right")
-        ttk.Button(header, text="Anterior", command=lambda: self.show_page(-1)).pack(side="right")
-        footer = tk.Frame(self, bg=PAPER, padx=20, pady=14)
-        footer.pack(fill="x", side="bottom")
-        ttk.Button(footer, text="Salvar PDF", style="Accent.TButton", command=self.confirm).pack(side="right")
-        ttk.Button(footer, text="Voltar ao formulário", command=self.close).pack(side="right", padx=9)
+        label(header, "REVISAR DOCUMENTO", 9, bold=True, fg=ACCENT).pack(anchor="w")
+        label(header, title, 15, bold=True).pack(anchor="w", pady=(2, 0))
+        toolbar = tk.Frame(self, bg=PAPER, padx=16, pady=8)
+        toolbar.pack(fill="x")
+        ttk.Button(toolbar, text="Voltar", command=self.close).pack(side="left")
+        ttk.Button(toolbar, text="Salvar PDF", style="Accent.TButton", command=self.confirm).pack(side="right")
+        ttk.Button(toolbar, text="Imprimir", command=self.print_document).pack(side="right", padx=8)
+        label(self, f"Destino do PDF  ·  {destination}", 9, fg=MUTED, padx=16, pady=7).pack(fill="x")
+        pages = tk.Frame(self, bg=PAPER, padx=16, pady=5)
+        pages.pack(fill="x")
+        self.previous = ttk.Button(pages, text="‹", width=4, command=lambda: self.show_page(-1))
+        self.previous.pack(side="left")
+        self.counter = label(pages, "", fg=MUTED, width=12, anchor="center")
+        self.counter.pack(side="left")
+        self.next = ttk.Button(pages, text="›", width=4, command=lambda: self.show_page(1))
+        self.next.pack(side="left")
+        self.bind("<Control-s>", lambda _: self.confirm())
+        self.bind("<Control-p>", lambda _: self.print_document())
         body = tk.Frame(self)
         body.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(body, bg="#dbe4e6", highlightthickness=0)
@@ -123,7 +145,7 @@ class Preview(tk.Toplevel):
         try:
             bitmap = page.render(scale=min(1.3, 1000 / max(page.get_size())))
             try:
-                self.photo = ImageTk.PhotoImage(bitmap.to_pil().copy(), master=self)
+                self.photo = self.image_tk.PhotoImage(bitmap.to_pil().copy(), master=self)
             finally:
                 bitmap.close()
         finally:
@@ -133,10 +155,27 @@ class Preview(tk.Toplevel):
         self.canvas.configure(scrollregion=(0, 0, self.photo.width() + 24, self.photo.height() + 24))
         self.canvas.yview_moveto(0)
         self.counter.configure(text=f"{self.index + 1} de {len(self.pdf)}")
+        self.previous.state(["disabled"] if self.index == 0 else ["!disabled"])
+        self.next.state(["disabled"] if self.index + 1 == len(self.pdf) else ["!disabled"])
 
     def confirm(self):
-        self.confirmed = True
+        try:
+            self.saved = self.save_document()
+        except Exception as exc:
+            messagebox.showerror("Não foi possível salvar o PDF", str(exc), parent=self)
+            return
         self.close()
+
+    def print_document(self):
+        if sys.platform != "win32":
+            messagebox.showinfo("Imprimir", "Salve o PDF e abra-o em um leitor para imprimir.", parent=self)
+            return
+        from .printing import print_pdf
+
+        try:
+            print_pdf(self.pdf, self.winfo_id(), self.document_title)
+        except Exception as exc:
+            messagebox.showerror("Impressão", str(exc), parent=self)
 
     def close(self):
         self.pdf.close()
@@ -241,19 +280,13 @@ class App:
         self.page("Início", "Painel inicial", "Documentos municipais",
                   "Preencha um modelo, confira o PDF e arquive o documento na mesma estação.")
         body = self.scroll_page()
-        recent = self.store.history()
         summary = tk.Frame(body, bg=ACCENT_BG, padx=18, pady=17)
         summary.pack(fill="x", padx=(0, 10), pady=(0, 14))
         label(summary, "EMISSÃO DE DOCUMENTOS", 9, bold=True, fg=ACCENT, bg=ACCENT_BG).pack(anchor="w")
-        label(summary, f"{len(self.store.models())} modelos ativos  •  {len(recent)} PDFs no histórico",
+        label(summary, f"{self.store.model_count()} modelos ativos",
               14, bold=True, bg=ACCENT_BG).pack(anchor="w", pady=(5, 11))
         ttk.Button(summary, text="Novo documento", style="Accent.TButton", command=self.catalog).pack(anchor="w")
-        box = self.card(body, "Últimas emissões", "Acompanhe os documentos gerados neste computador.")
-        for row in recent[:5]:
-            owner = row["owner"] or "Sem proprietário informado"
-            label(box, f"TD-{row['record_id']:06d}   ·   {row['title']}   ·   {owner}", fg=MUTED).pack(anchor="w", pady=4)
-        if not recent:
-            label(box, "O histórico está vazio.", fg=MUTED).pack(anchor="w", pady=4)
+        box = self.card(body, "Arquivo de documentos", "Consulte os PDFs que estão nas pastas de trabalho.")
         ttk.Button(box, text="Consultar histórico", command=self.history).pack(anchor="w", pady=(8, 0))
 
     def catalog(self):
@@ -370,13 +403,16 @@ class App:
             try:
                 data = future.result()
                 self.form_status.configure(text="Prévia pronta para conferência.")
-                preview = Preview(self.root, data)
-                self.root.wait_window(preview)
-                if preview.confirmed:
-                    rid, version, _ = self.store.save_record(
+                def archive():
+                    return self.store.save_record(
                         model, values, fractions, data, values.get("NumeroDocumento", reference).strip(), record_id)
+
+                preview = Preview(self.root, data, model.title, self.store.destination(model.kind), archive)
+                self.root.wait_window(preview)
+                if preview.saved:
+                    rid, version, path = preview.saved
                     self.history()
-                    messagebox.showinfo("Documento arquivado", f"TD-{rid:06d} · revisão {version:02d}",
+                    messagebox.showinfo("PDF salvo", f"TD-{rid:06d} · revisão {version:02d}\n\n{path}",
                                         parent=self.root)
             except Exception as exc:
                 self.error(exc)
@@ -389,7 +425,7 @@ class App:
 
     def history(self):
         self.page("Histórico", "Arquivo local", "Histórico de documentos",
-                  "Pesquise por proprietário, número informado ou código TD. Cada revisão tem seu próprio PDF.")
+                  "PDFs encontrados nas pastas do repositório. Pesquise pelo nome do arquivo, tipo, proprietário ou referência.")
         body = tk.Frame(self.main, bg=BG, padx=26, pady=16)
         body.pack(fill="both", expand=True)
         query = tk.StringVar()
@@ -397,10 +433,13 @@ class App:
         searchbar.pack(fill="x", pady=(0, 10))
         label(searchbar, "Pesquisar", 9, bold=True, bg=BG).pack(side="left")
         ttk.Entry(searchbar, textvariable=query, width=35).pack(side="left", padx=8)
+        ttk.Button(searchbar, text="Abrir pastas", command=lambda: self.safe(
+            lambda: open_path(self.store.archive))).pack(side="right")
+        ttk.Button(searchbar, text="Atualizar", command=lambda: reload_archive()).pack(side="right", padx=5)
         panel = tk.Frame(body, bg=BG)
         panel.pack(fill="both", expand=True)
         columns = [("code", "Código / rev.", 121), ("reference", "Nº / referência", 113),
-                   ("owner", "Proprietário", 166), ("model", "Documento", 170), ("date", "Emissão", 100)]
+                   ("owner", "Proprietário", 166), ("model", "Arquivo / tipo", 210), ("date", "Emissão", 100)]
         table = ttk.Treeview(panel, columns=[x[0] for x in columns], show="headings", selectmode="browse")
         bar = ttk.Scrollbar(panel, command=table.yview)
         table.configure(yscrollcommand=bar.set)
@@ -412,15 +451,33 @@ class App:
         status = label(body, "", fg=MUTED, bg=BG)
         status.pack(anchor="w", pady=(8, 0))
 
+        rows, documents = {}, []
+
+        def reload_archive():
+            try:
+                documents[:] = self.store.history()
+            except Exception as exc:
+                status.configure(text=str(exc))
+                return
+            refresh()
+
         def refresh(*_):
             table.delete(*table.get_children())
-            rows = self.store.history(query.get())
-            for row in rows:
-                rid, version = row["record_id"], row["version"]
-                table.insert("", "end", iid=f"{rid}:{version}", values=(
-                    f"TD-{rid:06d} / {version:02d}", row["reference"] or "—", row["owner"] or "—",
-                    row["title"], date.fromisoformat(row["created"][:10]).strftime("%d/%m/%Y")))
-            status.configure(text=f"{len(rows)} PDF(s) encontrado(s)")
+            rows.clear()
+            try:
+                for index, row in enumerate(documents):
+                    if not matches_history(row, query.get()):
+                        continue
+                    rid, version = row["record_id"], row["version"]
+                    rows[str(index)] = row
+                    table.insert("", "end", iid=str(index), values=(
+                        f"TD-{rid:06d} / {version:02d}" if rid else "Arquivo da pasta",
+                        row["reference"] or "—", row["owner"] or "—",
+                        row["title"] if rid else row["path"].name,
+                        date.fromisoformat(row["created"][:10]).strftime("%d/%m/%Y")))
+                status.configure(text=f"{len(rows)} PDF(s) encontrado(s)")
+            except Exception as exc:
+                status.configure(text=str(exc))
 
         def selected(action):
             selection = table.selection()
@@ -428,16 +485,20 @@ class App:
                 messagebox.showinfo("Histórico", "Selecione um documento na lista.", parent=self.root)
                 return
             try:
-                row = self.store.record(*map(int, selection[0].split(":")))
-                action(row)
+                action(rows[selection[0]])
             except Exception as exc:
                 self.error(exc)
 
         def correct(row):
-            self.form(Model(row["model_id"], row["title"], row["kind"], row["document"]), row)
+            if row["record_id"] is None:
+                raise ValueError("Este PDF foi adicionado pela pasta e não possui formulário registrado.")
+            record = self.store.record(row["record_id"], row["version"])
+            self.form(Model(record["model_id"], record["title"], record["kind"], record["document"]), record)
 
         def show_pdf(row):
-            open_path(self.store.ensure_pdf(row["file"], row["pdf"]))
+            if not row["path"].is_file():
+                raise FileNotFoundError("O PDF não está mais na pasta. Clique em Atualizar.")
+            open_path(row["path"])
 
         query.trace_add("write", refresh)
         table.bind("<Double-1>", lambda _: selected(show_pdf))
@@ -446,7 +507,7 @@ class App:
         ttk.Button(actions, text="Abrir PDF", command=lambda: selected(show_pdf)).pack(side="left")
         ttk.Button(actions, text="Corrigir e gerar nova revisão", style="Accent.TButton",
                    command=lambda: selected(correct)).pack(side="left", padx=8)
-        refresh()
+        reload_archive()
 
     def models(self):
         self.page("Modelos Word", "Gerenciamento", "Modelos Word",
@@ -627,7 +688,7 @@ class App:
 def main():
     root = tk.Tk()
     try:
-        App(root, Storage(data_directory()))
+        App(root, Storage(data_directory(), archive_directory()))
     except Exception as exc:
         root.withdraw()
         messagebox.showerror("Tributos Docs", str(exc), parent=root)

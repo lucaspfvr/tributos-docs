@@ -2,9 +2,9 @@
 
 Automação de processos documentais para o setor de tributos.
 
-## Etapa 04
+## Etapa 05
 
-Aplicativo integrado com prévia, histórico, revisões, modelos editáveis, backups e empacotamento.
+Arquivo por categoria, busca no histórico e integração de impressão no Windows.
 
 Esta é uma etapa da reconstrução incremental do projeto. Os documentos de exemplo são demonstrativos e sem validade.
 
