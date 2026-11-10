@@ -2,9 +2,9 @@
 
 Automação de processos documentais para o setor de tributos.
 
-## Etapa 08
+## Etapa 09
 
-Valor por extenso e reaproveitamento do endereço na avaliação.
+Painel inicial com documentos recentes, menu lateral e configurações agrupadas.
 
 Esta é uma etapa da reconstrução incremental do projeto. Os documentos de exemplo são demonstrativos e sem validade.
 
