@@ -2,9 +2,9 @@
 
 Automação de processos documentais para o setor de tributos.
 
-## Etapa 02
+## Etapa 03
 
-Seleção dos três documentos, campos por modelo e frações do desdobro.
+Geração de PDF a partir do Word preenchido.
 
 Esta é uma etapa da reconstrução incremental do projeto. Os documentos de exemplo são demonstrativos e sem validade.
 
@@ -17,3 +17,5 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe app.py
 ```
+
+Para gerar PDF, é necessário Word para desktop ou LibreOffice Writer.

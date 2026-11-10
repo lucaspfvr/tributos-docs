@@ -1,7 +1,7 @@
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-
+from tributos.docx import export_pdf
 from tributos.models import ASSETS, FRACTION_FIELDS, Model, defaults, prepare
 
 ASSET_DIR = Path(__file__).parent / "tributos" / "assets"
@@ -69,7 +69,7 @@ def main():
             add_button.pack(anchor="w", pady=6)
             add_fraction()
 
-        def save():
+        def save(kind):
             try:
                 fields = {key: variable.get() for key, variable in variables.items()}
                 fractions = [{key: value.get() for key, value in row.items()} for row in fraction_rows]
@@ -83,7 +83,8 @@ def main():
             except (OSError, ValueError) as exc:
                 messagebox.showerror("Tributos Docs", str(exc), parent=window)
 
-        ttk.Button(actions, text="Salvar Word", command=save).pack(side="left")
+        ttk.Button(actions, text="Salvar Word", command=lambda: save("docx")).pack(side="left")
+        ttk.Button(actions, text="Salvar PDF", command=lambda: save("pdf")).pack(side="left", padx=8)
         canvas.yview_moveto(0)
 
     selector.bind("<<ComboboxSelected>>", show_form)
