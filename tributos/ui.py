@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from .appearance import DEFAULT_THEME, PALETTES
 from .controls import CommandControls
-from .docx import export_pdf, layout_font
+from .docx import export_pdf
 from .models import (ADDRESS_PARTS, FRACTION_FIELDS, MAX_FRACTIONS, REQUIRED, TAX_ID_FIELDS, Model, defaults,
                      format_tax_id, normalize_fields, number_br, prepare)
 from .storage import Storage, atomic_write, current_desdobro, matches_history, pdf_stem
@@ -625,6 +625,7 @@ class App:
             child.destroy()
         self.scroll = None
         self.history_scroll = None
+        self.active_nav = active
         for name, button in self.nav_buttons.items():
             button.configure(style="Selected.Nav.TButton" if name == active else "Nav.TButton")
         if compact:
@@ -778,7 +779,12 @@ class App:
         values = json.loads(previous["form"]) if previous else defaults()
         self.form_vars = {}
         entries = {}
-        reference = tk.StringVar(value=previous["reference"] if previous else "")
+        if previous:
+            self.suggested_reference = None
+            number = previous["reference"] or values.get("NumeroDocumento") or f"{record_id:03d}"
+        else:
+            number = self.suggested_reference = self.store.next_reference(model)
+        self.document_number = tk.StringVar(value=number)
         groups = model.groups()
         available = {key for group in groups.values() for key in group}
         pairs = [(f"{part}Residencial", f"{part}Imovel") for part in ADDRESS_PARTS
@@ -786,7 +792,7 @@ class App:
         self.address_link = tk.BooleanVar(value=values.get("_EnderecoCompartilhado") == "1") if pairs else None
         if "NumeroDocumento" not in available:
             groups = dict(groups)
-            groups["Emissão"] = {"_Referencia": "Número do documento (opcional)", **groups.get("Emissão", {})}
+            groups["Emissão"] = {"_Referencia": "Número do documento", **groups.get("Emissão", {})}
             groups = {"Emissão": groups.pop("Emissão"), **groups}
         for group, fields in groups.items():
             title = "Imóvel de origem" if group == "Imóvel" and model.kind == "desdobro" else group
@@ -802,7 +808,10 @@ class App:
                 grid.columnconfigure(col, weight=1, uniform="form")
             for index, (key, caption) in enumerate(fields.items()):
                 row, col = divmod(index, 3)
-                variable = reference if key == "_Referencia" else tk.StringVar(value=values.get(key, ""))
+                if key in {"_Referencia", "NumeroDocumento"}:
+                    variable = self.document_number
+                else:
+                    variable = tk.StringVar(value=values.get(key, ""))
                 if key != "_Referencia":
                     self.form_vars[key] = variable
                 cell = tk.Frame(grid, bg=T.paper)
@@ -839,7 +848,7 @@ class App:
             self.fraction_table.pack(fill="x")
             self.update_fractions()
         self.generate_button = ttk.Button(footer, text="Revisar documento  ›", style="Accent.TButton",
-            command=lambda: self.generate(model, reference.get(), record_id))
+            command=lambda: self.generate(model, record_id))
         self.generate_button.pack(side="right")
         ttk.Button(footer, text="Voltar", command=lambda: self.navigate(self.history if record_id else self.catalog)).pack(side="right", padx=8)
 
@@ -864,8 +873,15 @@ class App:
             for col, variable in enumerate(variables.values(), 1):
                 ttk.Entry(self.fraction_table, textvariable=variable, width=8).grid(row=index, column=col, sticky="ew", padx=3, pady=3)
 
-    def generate(self, model, reference, record_id):
+    def generate(self, model, record_id):
         try:
+            number = self.document_number.get().strip()
+            automatic = record_id is None and (not number or number == self.suggested_reference)
+            if automatic:
+                number = self.suggested_reference = self.store.next_reference(model)
+                self.document_number.set(number)
+            if not number:
+                raise ValueError("Preencha o número do documento.")
             if model.has_fractions() and (not self.count.get().isdigit() or int(self.count.get()) != self.active_fractions):
                 raise ValueError(f"Informe entre 1 e {MAX_FRACTIONS} frações.")
             values = normalize_fields({key: var.get() for key, var in self.form_vars.items()})
@@ -880,7 +896,7 @@ class App:
         self.busy = True
         self.generate_button.configure(state="disabled")
         self.form_status.configure(text="Gerando o PDF…")
-        future = self.executor.submit(export_pdf, filled, required_font=layout_font(filled, model.kind))
+        future = self.executor.submit(export_pdf, filled)
         def complete():
             if not future.done():
                 self.root.after(90, complete)
@@ -888,15 +904,15 @@ class App:
             try:
                 data = future.result()
                 self.form_status.configure(text="Prévia pronta para conferência.")
-                number = values.get("NumeroDocumento", reference).strip()
                 owner = values.get("NomeProprietario", "")
                 stem = pdf_stem(model.kind, model.title, number, owner, record_id)
 
                 def archive():
-                    return self.store.save_record(model, values, fractions, data, number, record_id)
+                    return self.store.save_record(model, values, fractions, data, number, record_id,
+                                                  automatic=automatic)
 
                 preview = Preview(self.root, data, model.title, self.store.destination(model.kind),
-                                  f"{stem}.pdf" if number else "PDF com número automático",
+                                  f"{stem}.pdf",
                                   review_details(model.kind, values, fractions, number), archive, self.controls)
                 self.root.wait_window(preview)
                 if preview.saved:

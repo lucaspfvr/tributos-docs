@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS revisions (
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY);
 """
-PREVIOUS_DESDOBRO = {"3f827801a2225a1ac42b3c9e68a8dd660a83f37bc373e09923e7b11eecb2ca38", "aba2e0a0fb2fa49ee54e05117b919da73afe5528f5a19ead6e5762c0c96bff38"}
+PREVIOUS_DESDOBRO = {"16e2e911a738975b50e0c3d1325a324ac7870d9a32958c3ab9ed1aa95d92dbc8", "7751c3066c9bbfc1d1aa29e1c4689dd1c0e3b5372876a6b09c888a4cc462b665"}
 
 
 def current_desdobro(document):
@@ -127,7 +127,26 @@ class Storage:
         with self.connection:
             self.connection.execute("DELETE FROM models WHERE id = ?", (model_id,))
 
-    def save_record(self, model, form, fractions, pdf, reference, record_id=None):
+    def next_reference(self, model):
+        if model.kind in FOLDERS:
+            rows = self.connection.execute(
+                "SELECT record_id, reference FROM revisions WHERE kind = ?", (model.kind,))
+        else:
+            rows = self.connection.execute(
+                "SELECT record_id, reference FROM revisions WHERE kind = ? AND model_id = ?",
+                (model.kind, model.id))
+        last = 0
+        for row in rows:
+            reference = row["reference"].strip()
+            match = re.fullmatch(r"([0-9]{1,18})(?:\s*[/\-]\s*[0-9]{4})?", reference)
+            if match:
+                last = max(last, int(match[1]))
+            elif not reference:
+                # Older releases used the record ID as the PDF number when the field was blank.
+                last = max(last, row["record_id"])
+        return f"{last + 1:03d}"
+
+    def save_record(self, model, form, fractions, pdf, reference, record_id=None, *, automatic=False):
         self.prepare_archive()
         now = datetime.now()
         owner = form.get("NomeProprietario", "").strip()
@@ -136,6 +155,9 @@ class Storage:
             with self.connection:
                 self.connection.execute("BEGIN IMMEDIATE")
                 if record_id is None:
+                    if automatic and reference != self.next_reference(model):
+                        raise ValueError("Outro documento foi arquivado enquanto esta prévia estava aberta. "
+                                         "Clique em Voltar e editar e revise o documento com o novo número.")
                     record_id = self.connection.execute("INSERT INTO records DEFAULT VALUES").lastrowid
                 version = self.connection.execute(
                     "SELECT coalesce(max(version), 0)+1 FROM revisions WHERE record_id=?", (record_id,)

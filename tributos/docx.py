@@ -1,14 +1,12 @@
 """Fill WordprocessingML text while keeping the document's layout and assets."""
 
 import base64
-import ctypes
 import io
 import os
 import re
 import shutil
 import subprocess
 import sys
-from contextlib import closing
 from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -260,66 +258,7 @@ def export_with_libreoffice(executable, source, pdf):
         raise ValueError("O LibreOffice terminou sem gerar o PDF. Revise o modelo no Writer.")
 
 
-HEADING = "MODELO DEMONSTRATIVO"
-BERNARD = "Bernard MT Condensed"
-
-
-def layout_font(document, kind):
-    if kind not in {"desdobro", "retificacao", "avaliacao"}:
-        return None
-    with ZipFile(io.BytesIO(document)) as package:
-        if kind == "avaliacao":
-            if "word/styles.xml" in package.namelist():
-                styles = xml(package.read("word/styles.xml"))
-                normal = styles.find(f'{W}style[@{W}default="1"][@{W}type="paragraph"]')
-                fonts = normal.find(f"{W}rPr/{W}rFonts") if normal is not None else None
-                if fonts is not None and fonts.get(W + "ascii") == "Aptos":
-                    for paragraph in paragraphs(xml(package.read("word/document.xml"))):
-                        title = "".join(t.text or "" for t in paragraph.iter(W + "t"))
-                        if title == "AVALIAÇÃO MUNICIPAL DE IMÓVEL":
-                            return "Aptos"
-        else:
-            for name in package.namelist():
-                if re.fullmatch(r"word/header[0-9]+\.xml", name):
-                    for run in xml(package.read(name)).iter(W + "r"):
-                        fonts = run.find(f"{W}rPr/{W}rFonts")
-                        if fonts is not None and fonts.get(W + "ascii") == BERNARD:
-                            if HEADING in "".join(t.text or "" for t in run.iter(W + "t")):
-                                return BERNARD
-    return None
-
-
-def verify_pdf_font(data, required):
-    if required is None:
-        return
-    import pypdfium2 as pdfium
-    from pypdfium2 import raw
-
-    def font_at(text, index):
-        buffer = ctypes.create_string_buffer(256)
-        raw.FPDFText_GetFontInfo(text, index, buffer, len(buffer), None)
-        return re.sub(r"[^a-z]", "", buffer.value.decode("ascii", errors="ignore").lower())
-
-    name = re.sub(r"[^a-z]", "", required.lower())
-    with pdfium.PdfDocument(data) as pdf, closing(pdf[0]) as page, closing(page.get_textpage()) as text:
-        characters = [chr(raw.FPDFText_GetUnicode(text, i)) for i in range(text.count_chars())]
-        if required == BERNARD:
-            match = re.search(HEADING.replace(" ", r"\s+"), "".join(characters))
-            if match:
-                letters = [i for i in range(*match.span()) if characters[i].isalpha()]
-                baselines = [text.get_charbox(i)[1] for i in letters]
-                if max(baselines) - min(baselines) < 5 and all(name in font_at(text, i) for i in letters):
-                    return
-        elif any(name in font_at(text, i) for i, c in enumerate(characters) if c.isalpha()):
-            return
-    if required == BERNARD:
-        raise ValueError("O PDF não preservou o cabeçalho em Bernard MT Condensed. Abra o modelo no Word, "
-                         "confirme que a fonte Bernard MT Condensed está disponível e tente novamente.")
-    raise ValueError("O PDF não utilizou a fonte Aptos. Instale a fonte pelo instalador do Tributos Docs "
-                     "e reabra o Word ou o Writer.")
-
-
-def export_pdf(document, *, required_font=None):
+def export_pdf(document):
     with TemporaryDirectory(prefix="conversao-", ignore_cleanup_errors=True) as folder:
         path = Path(folder)
         source = path / "Documento.docx"
@@ -329,9 +268,7 @@ def export_pdf(document, *, required_font=None):
         if sys.platform == "win32":
             try:
                 export_with_word(source, pdf)
-                data = pdf.read_bytes()
-                verify_pdf_font(data, required_font)
-                return data
+                return pdf.read_bytes()
             except ValueError as exc:
                 word_error = exc
         executable = libreoffice()
@@ -341,6 +278,4 @@ def export_pdf(document, *, required_font=None):
             raise ValueError("Instale o LibreOffice Writer para gerar o PDF neste sistema.")
         pdf.unlink(missing_ok=True)
         export_with_libreoffice(executable, source, pdf)
-        data = pdf.read_bytes()
-        verify_pdf_font(data, required_font)
-        return data
+        return pdf.read_bytes()

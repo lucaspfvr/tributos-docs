@@ -4,12 +4,13 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from zipfile import ZipFile
 
 import pypdfium2 as pdfium
 from lxml import etree
 
-from tributos.docx import BERNARD, W, export_pdf, layout_font, replace_tags, write_package, xml
+from tributos.docx import W, export_pdf, replace_tags, write_package, xml
 from tributos.models import Model, defaults, format_tax_id, prepare
 from tributos.storage import Storage
 
@@ -107,7 +108,9 @@ class ProjectTest(unittest.TestCase):
             original_title = next(t for t in xml(original.read("word/document.xml")).iter(W + "t")
                                   if t.text == title.text)
             self.assertEqual(etree.tostring(title.getparent()), etree.tostring(original_title.getparent()))
-            self.assertEqual(layout_font(filled, "avaliacao"), "Aptos")
+            styles = xml(output.read("word/styles.xml"))
+            normal = styles.find(f'{W}style[@{W}styleId="Normal"]')
+            self.assertEqual(normal.find(f"{W}rPr/{W}rFonts").get(W + "ascii"), "Aptos")
         filled = prepare(model, dict(fields, ValorAvaliacao="1.000.000,01"), [])
         with ZipFile(io.BytesIO(filled)) as output:
             self.assertIn("Um milhão de reais e um centavo.", "".join(xml(output.read("word/document.xml")).itertext()))
@@ -116,9 +119,11 @@ class ProjectTest(unittest.TestCase):
         model = self.models["desdobro"]
         fractions = [dict(self.fractions[0], numero=""), *self.fractions[1:]]
         document = prepare(model, self.fields, fractions)
-        self.assertEqual(layout_font(document, "desdobro"), BERNARD)
         with ZipFile(io.BytesIO(document)) as filled, ZipFile(io.BytesIO(model.document)) as original:
-            self.assertEqual(filled.read("word/header1.xml"), original.read("word/header1.xml"))
+            header = filled.read("word/header1.xml")
+            self.assertEqual(header, original.read("word/header1.xml"))
+            self.assertTrue(any(font.get(W + "ascii") == "Bernard MT Condensed"
+                                for font in xml(header).iter(W + "rFonts")))
             body = xml(filled.read("word/document.xml"))
             lots = next(p for p in body.iter(W + "p") if "Lote 07-A" in "".join(p.itertext()))
             self.assertNotIn("04 frações", "".join(lots.itertext()))
@@ -206,6 +211,39 @@ class ProjectTest(unittest.TestCase):
         _, _, sanitized = self.store.save_record(self.models["retificacao"],
             fields, [], b"PDF", "001/2026")
         self.assertEqual(sanitized.name, "RETIFICAÇÃO 001-2026 PESSOA DE TESTE.pdf")
+
+    def test_independent_sequences_follow_archived_numbers(self):
+        split = self.models["desdobro"]
+        rectification = self.models["retificacao"]
+        assessment = self.models["avaliacao"]
+        self.assertEqual([self.store.next_reference(m) for m in self.models.values()], ["001"] * 3)
+        rid, _, first = self.store.save_record(split, self.fields, self.fractions, b"%PDF", "001", automatic=True)
+        self.assertTrue(first.name.startswith("DESDOBRO 001 "))
+        self.store.save_record(split, self.fields, self.fractions, b"%PDF", "001", rid)
+        self.assertEqual(self.store.next_reference(split), "002")
+        self.assertEqual(self.store.next_reference(rectification), "001")
+        self.assertEqual(self.store.next_reference(assessment), "001")
+        self.store.save_record(rectification, self.fields, [], b"%PDF", "006/2026")
+        self.assertEqual(self.store.next_reference(rectification), "007")
+        self.store.save_record(assessment, self.fields, [], b"%PDF", "")
+        self.assertEqual(self.store.next_reference(assessment), "004")
+        self.assertEqual(self.store.next_reference(split), "002")
+
+    def test_stale_automatic_number_and_failed_write_do_not_consume_numbers(self):
+        model = self.models["desdobro"]
+        other = Storage(self.root)
+        self.addCleanup(other.connection.close)
+        stale = other.next_reference(model)
+        self.store.save_record(model, self.fields, self.fractions, b"%PDF", stale, automatic=True)
+        with self.assertRaisesRegex(ValueError, "Outro documento"):
+            other.save_record(model, self.fields, self.fractions, b"%PDF", stale, automatic=True)
+        with patch("tributos.storage.atomic_write", side_effect=OSError("falha de teste")):
+            with self.assertRaises(OSError):
+                other.save_record(model, self.fields, self.fractions, b"%PDF", "002", automatic=True)
+        self.assertEqual(other.next_reference(model), "002")
+        self.assertEqual(len(other.history()), 1)
+        self.assertEqual(other.save_record(model, self.fields, self.fractions, b"%PDF",
+                                           "002", automatic=True)[:2], (2, 1))
 
     def test_desdobro_validation_and_one_fraction(self):
         model = self.models["desdobro"]

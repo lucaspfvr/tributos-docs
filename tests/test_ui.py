@@ -4,6 +4,7 @@ import tkinter as tk
 import unittest
 from pathlib import Path
 from tkinter import ttk
+from unittest.mock import patch
 from types import SimpleNamespace
 
 from tributos.storage import Storage
@@ -135,4 +136,42 @@ class NavigationTest(unittest.TestCase):
         button("Editar").invoke()
         self.root.update()
         self.assertEqual(self.app.form_vars["NomeProprietario"].get(), "PESSOA TESTE")
+        self.assertEqual(self.app.document_number.get(), "012")
         self.assertIsNotNone(self.store.record(rid, 1))
+
+
+    def test_automatic_reference_reaches_word_preview_history_and_filename(self):
+        app = self.app
+        app.nav_buttons["Avaliação"].invoke()
+        self.assertEqual(app.document_number.get(), "001")
+        self.assertIs(app.document_number, app.form_vars["NumeroDocumento"])
+        for key, value in {"NomeProprietario": "PESSOA TESTE", "ValorAvaliacao": "450000"}.items():
+            app.form_vars[key].set(value)
+
+        class SavePreview(tk.Toplevel):
+            def __init__(self, parent, data, title, destination, suggested, details, save, controls):
+                super().__init__(parent)
+                self.saved = save()
+                self.after_idle(self.destroy)
+
+        errors = []
+        with patch("tributos.ui.Preview", SavePreview), \
+             patch("tributos.ui.export_pdf", return_value=b"%PDF-ficticio") as export, \
+             patch.object(app, "error", side_effect=errors.append):
+            app.generate_button.invoke()
+            end = time.monotonic() + 2
+            while app.busy and time.monotonic() < end:
+                self.root.update()
+                time.sleep(.01)
+        self.assertFalse(app.busy)
+        self.assertEqual(errors, [])
+        export.assert_called_once()
+        record, = app.store.history()
+        self.assertEqual(record["reference"], "001")
+        self.assertEqual(record["path"].name, "AVALIAÇÃO 001 PESSOA TESTE.pdf")
+        self.assertTrue(any(isinstance(w, tk.Label) and w.cget("text") == "PDF arquivado"
+                            for w in descendants(app.main)))
+        app.nav_buttons["Avaliação"].invoke()
+        self.assertEqual(app.document_number.get(), "002")
+        app.nav_buttons["Desdobro"].invoke()
+        self.assertEqual(app.document_number.get(), "001")
