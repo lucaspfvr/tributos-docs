@@ -2,9 +2,9 @@
 
 Automação de processos documentais para o setor de tributos.
 
-## Etapa 10
+## Etapa 11
 
-Detalhes no histórico, animação da barra lateral e opção de instalar a Aptos.
+Restauração de uma linha por fração, com atualização do modelo padrão.
 
 Esta é uma etapa da reconstrução incremental do projeto. Os documentos de exemplo são demonstrativos e sem validade.
 

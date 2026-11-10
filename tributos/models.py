@@ -196,20 +196,19 @@ def prepare(model, fields, fractions):
         for index, fraction in enumerate(fractions, 1):
             row = {key: fraction.get(key, "").strip() for key in FRACTION_FIELDS}
             for key, label in FRACTION_FIELDS.items():
-                if key == "numero" and "FracoesEmLinha" in keys and "Fracoes" not in keys:
-                    continue
-                if not row[key]:
+                if key != "numero" and not row[key]:
                     raise ValueError(f"Fração {index} · preencha «{label}».")
             area = number_br(row["area"], f"a área da fração {index}", positive=True)
             lot = row["lote"]
             if not lot.casefold().startswith("lote "):
                 lot = f"Lote {lot}"
-            lines.append(f"{lot}, com uma área total de {area} m², situado em {row['endereco']}, nº {row['numero']}")
+            number = row["numero"]
+            lines.append(f"{lot}, com uma área total de {area} m², situado em {row['endereco']}"
+                         + (f", nº {number}" if number else ""))
             if "FracoesEmLinha" in keys:
                 street = row["endereco"]
                 if not re.match(r"(?i)^(rua|avenida|av\.|praça|travessa|estrada|rodovia|alameda|beco)\s", street):
                     street = "rua " + street
-                number = row["numero"]
                 address = f", {number}" if number.upper() in {"S/N", "SN"} else f", nº {number}" if number else ""
                 if inline:
                     inline.append((" e " if index == len(fractions) else ", ", False))

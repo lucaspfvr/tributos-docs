@@ -63,7 +63,7 @@ class ProjectTest(unittest.TestCase):
                 if kind == "desdobro":
                     self.assertIn("04 frações", text)
                     self.assertIn("Lote 07-D", text)
-                    self.assertIn("778,44m²", text)
+                    self.assertIn("778,44 m²", text)
                     self.assertIn("nº 4", text)
                 elif kind == "retificacao":
                     self.assertIn("381,68", text)
@@ -112,18 +112,20 @@ class ProjectTest(unittest.TestCase):
         with ZipFile(io.BytesIO(filled)) as output:
             self.assertIn("Um milhão de reais e um centavo.", "".join(xml(output.read("word/document.xml")).itertext()))
 
-    def test_desdobro_uses_original_header_and_inline_lot_styles(self):
+    def test_desdobro_uses_original_header_and_one_line_per_fraction(self):
         model = self.models["desdobro"]
-        document = prepare(model, self.fields, [dict(row, numero="") for row in self.fractions])
+        fractions = [dict(self.fractions[0], numero=""), *self.fractions[1:]]
+        document = prepare(model, self.fields, fractions)
         self.assertEqual(layout_font(document, "desdobro"), BERNARD)
         with ZipFile(io.BytesIO(document)) as filled, ZipFile(io.BytesIO(model.document)) as original:
             self.assertEqual(filled.read("word/header1.xml"), original.read("word/header1.xml"))
             body = xml(filled.read("word/document.xml"))
-            para = next(p for p in body.iter(W + "p") if "04 frações" in "".join(p.itertext()))
-            self.assertIn(" e Lote 07-D", "".join(para.itertext()))
-            self.assertFalse(list(para.iter(W + "br")))
-            lot = next(t for t in para.iter(W + "t") if t.text == "Lote 07-D")
-            self.assertIsNotNone(lot.getparent().find(f"{W}rPr/{W}b"))
+            lots = next(p for p in body.iter(W + "p") if "Lote 07-A" in "".join(p.itertext()))
+            self.assertNotIn("04 frações", "".join(lots.itertext()))
+            lines = [t.text for t in lots.iter(W + "t")]
+            self.assertEqual(len(list(lots.iter(W + "br"))), 3)
+            self.assertEqual([line.split(",")[0] for line in lines], [f"Lote 07-{x}" for x in "ABCD"])
+            self.assertNotIn("nº", lines[0])
 
     def test_new_key_in_split_word_runs_and_history(self):
         model = self.models["desdobro"]
