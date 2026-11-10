@@ -63,10 +63,17 @@ class NavigationTest(unittest.TestCase):
     def test_menu_only_toggles_from_its_button_and_persists(self):
         app = self.app
         self.assertFalse(app.sidebar_expanded)
+        self.root.geometry("640x420")
+        self.root.update()
+        self.assertTrue(app.menu_toggle.winfo_viewable())
+        self.assertLess(app.menu_toggle.winfo_y(), app.nav_buttons["Início"].winfo_y())
+        self.assertGreaterEqual(app.menu_toggle.winfo_width(), 40)
+        self.assertIn(str(app.controls.icons["expand", False]), app.menu_toggle.cget("image"))
         app.menu_toggle.invoke()
         self.assertEqual(int(app.sidebar.cget("width")), 56)
         self.wait_animation()
         self.assertEqual(app.sidebar.winfo_width(), 180)
+        self.assertEqual(app.menu_toggle.cget("text"), "Recolher menu")
         for page in ("Desdobro", "Configurações", "Histórico", "Início"):
             app.nav_buttons[page].invoke()
             self.root.update()
@@ -79,6 +86,7 @@ class NavigationTest(unittest.TestCase):
             app.nav_buttons[page].invoke()
             self.root.update()
             self.assertFalse(app.sidebar_expanded)
+            self.assertTrue(app.menu_toggle.winfo_viewable())
             self.assertEqual(app.nav_buttons[page].cget("text"), "")
         app.menu_toggle.invoke()
         app.menu_toggle.invoke()

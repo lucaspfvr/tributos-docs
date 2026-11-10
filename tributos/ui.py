@@ -419,6 +419,7 @@ class App:
         style.configure(".", font=(FONT, 10), foreground=T.ink)
         style.configure("TButton", padding=(13, 8), foreground=T.accent, font=(FONT, 10, "bold"),
                         focuscolor=T.accent)
+        style.configure("Menu.TButton", padding=(7, 8), width=-1)
         style.configure("Nav.TButton", padding=(11, 7), width=-1, anchor="w", foreground=T.ink, font=(FONT, 10))
         style.configure("Selected.Nav.TButton", foreground=T.accent, font=(FONT, 10, "bold"))
         style.map("TButton", foreground=[("disabled", T.muted)])
@@ -456,12 +457,11 @@ class App:
         tk.Label(brand, image=self.logo_small, bg=T.nav).pack(side="left", padx=4)
         self.brand_name = label(brand, "Biquinhas", 12, bold=True, bg=T.nav)
         self.brand_name.pack(side="left", padx=(5, 0))
-        tk.Frame(self.sidebar, bg=T.line, height=1).pack(fill="x", padx=9, pady=(0, 5))
-        self.menu_toggle = ttk.Button(self.sidebar, image=self.controls.icons["menu", False],
-                                      compound="left", style="Nav.TButton",
+        self.menu_toggle = ttk.Button(self.sidebar, compound="left", style="Menu.TButton", takefocus=True,
                                       command=lambda: self.set_sidebar(not self.sidebar_expanded))
-        self.menu_toggle.pack(side="bottom", fill="x", padx=5, pady=9)
+        self.menu_toggle.pack(fill="x", padx=6, pady=(2, 8))
         self.nav_tooltip(self.menu_toggle, lambda: "Recolher menu" if self.sidebar_expanded else "Expandir menu")
+        tk.Frame(self.sidebar, bg=T.line, height=1).pack(fill="x", padx=9, pady=(0, 5))
         links = (
             ("Início", "home", self.dashboard),
             ("Desdobro", "split", lambda: self.open_kind("desdobro")),
@@ -484,7 +484,7 @@ class App:
             self.brand_name.pack(side="left", padx=(5, 0))
         else:
             self.brand_name.pack_forget()
-        self.menu_toggle.configure(text="Recolher" if visible else "",
+        self.menu_toggle.configure(text="Recolher menu" if visible else "",
                                    image=self.controls.icons["collapse" if self.sidebar_expanded else "expand", False])
         for name, button in self.nav_buttons.items():
             button.configure(text=name if visible else "")
