@@ -136,10 +136,46 @@ def write_package(entries):
     return output.getvalue()
 
 
-def replace_tags(data, values=None):
+def resolve_assessment_font(root, *, footer=False):
+    from lxml import etree
+
+    # The original assessment uses the East Asian font hint on ordinary
+    # Latin text. Resolve that inherited face on the generated copy only.
+    for paragraph in paragraphs(root):
+        props = paragraph.find(W + "pPr")
+        if props is None or props.find(W + "pStyle") is not None:
+            continue
+        fonts = props.find(f"{W}rPr/{W}rFonts")
+        if not footer and (fonts is None or fonts.attrib != {W + "hint": "eastAsia"}):
+            continue
+        if footer and fonts is not None and set(fonts.attrib) - {W + "hint"}:
+            continue
+        for run in paragraph.iter(W + "r"):
+            if next(run.iterancestors(W + "p"), None) is not paragraph or run.find(W + "t") is None:
+                continue
+            run_props = run.find(W + "rPr")
+            if run_props is None:
+                run_props = etree.Element(W + "rPr")
+                run.insert(0, run_props)
+            fonts = run_props.find(W + "rFonts")
+            if run_props.find(W + "rStyle") is not None or (fonts is not None and
+                    set(fonts.attrib) - {W + "hint"}):
+                continue
+            if fonts is None:
+                fonts = etree.Element(W + "rFonts")
+                run_props.insert(0, fonts)
+            fonts.attrib.pop(W + "hint", None)
+            for script in ("ascii", "hAnsi", "eastAsia", "cs"):
+                fonts.set(W + script, "Times New Roman")
+
+
+def replace_tags(data, values=None, *, assessment=False):
     from lxml import etree
 
     entries = read_package(data)
+    if values is not None and assessment:
+        with ZipFile(Path(__file__).with_name("assets") / "avaliacao.docx") as original:
+            assessment = entries.get("word/styles.xml") == original.read("word/styles.xml")
     keys = {}
     for name, content in list(entries.items()):
         if not PART.fullmatch(name):
@@ -160,6 +196,8 @@ def replace_tags(data, values=None):
                             raise ValueError(f"Campo sem valor no formulário: <{match[1]}>.")
                         replace_span(nodes, *match.span(), values[match[1]])
         if values is not None:
+            if assessment and (name == "word/document.xml" or name.startswith("word/footer")):
+                resolve_assessment_font(root, footer=name.startswith("word/footer"))
             entries[name] = etree.tostring(root)
     return list(keys) if values is None else write_package(entries)
 

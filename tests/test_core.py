@@ -92,6 +92,24 @@ class ProjectTest(unittest.TestCase):
                     self.assertIn("JOSÉ D’ÁVILA", text)
                     self.assertIn("12.345.678/0001-99", text)
 
+    def test_assessment_derives_currency_and_preserves_template_styles(self):
+        model = self.models["avaliacao"]
+        self.assertNotIn("ValorExtenso", model.groups()["Avaliação"])
+        fields = dict(self.fields, ValorAvaliacao="450000", ValorExtenso="Texto antigo")
+        filled = prepare(model, fields, [])
+        with ZipFile(io.BytesIO(filled)) as output, ZipFile(io.BytesIO(model.document)) as original:
+            self.assertEqual(output.read("word/styles.xml"), original.read("word/styles.xml"))
+            self.assertEqual(output.read("word/theme/theme1.xml"), original.read("word/theme/theme1.xml"))
+            self.assertEqual(output.read("word/media/image1.png"), original.read("word/media/image1.png"))
+            root = xml(output.read("word/document.xml"))
+            self.assertIn("Quatrocentos e cinquenta mil reais.", "".join(root.itertext()))
+            title = next(t for t in root.iter(W + "t") if t.text == "AVALIAÇÃO MUNICIPAL DE IMÓVEL")
+            fonts = title.getparent().find(f"{W}rPr/{W}rFonts")
+            self.assertEqual(fonts.get(W + "ascii"), "Times New Roman")
+        filled = prepare(model, dict(fields, ValorAvaliacao="1.000.000,01"), [])
+        with ZipFile(io.BytesIO(filled)) as output:
+            self.assertIn("Um milhão de reais e um centavo.", "".join(xml(output.read("word/document.xml")).itertext()))
+
     def test_new_key_in_split_word_runs_and_history(self):
         model = self.models["desdobro"]
         with ZipFile(io.BytesIO(model.document)) as package:

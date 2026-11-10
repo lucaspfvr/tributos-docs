@@ -15,3 +15,6 @@ Tributos Docs inclui componentes de terceiros
   Código-fonte e avisos de licença do LibreOffice
   https://www.libreoffice.org/about-us/licenses/
   https://download.documentfoundation.org/libreoffice/src/26.2.7/
+
+num2words 0.5.14 — LGPL-2.1-or-later. Licença e avisos incluídos com a biblioteca.
+Código-fonte e distribuição: https://pypi.org/project/num2words/0.5.14/

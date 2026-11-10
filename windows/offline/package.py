@@ -11,6 +11,7 @@ OFFICE_NAME = "LibreOffice-Win-x64.msi"
 OFFICE_HASH = "480fecf759fc6393bd614fbf43753eb95a8198fc1a065d41b727e3b664cd1e59"
 WHEELS = (
     "lxml-6.1.1-cp312-cp312-win_amd64.whl",
+    "num2words-0.5.14-py3-none-any.whl",
     "pillow-12.3.0-cp312-cp312-win_amd64.whl",
     "pypdfium2-5.14.0-py3-none-win_amd64.whl",
 )

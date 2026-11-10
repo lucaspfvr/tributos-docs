@@ -2,9 +2,9 @@
 
 Automação de processos documentais para o setor de tributos.
 
-## Etapa 07
+## Etapa 08
 
-Controles da interface, máscara de CPF/CNPJ e normalização do proprietário.
+Valor por extenso e reaproveitamento do endereço na avaliação.
 
 Esta é uma etapa da reconstrução incremental do projeto. Os documentos de exemplo são demonstrativos e sem validade.
 

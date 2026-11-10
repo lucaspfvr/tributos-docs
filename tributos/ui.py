@@ -17,7 +17,7 @@ from uuid import uuid4
 from .appearance import DEFAULT_THEME, PALETTES
 from .controls import CommandControls
 from .docx import export_pdf
-from .models import (FRACTION_FIELDS, MAX_FRACTIONS, REQUIRED, TAX_ID_FIELDS, Model, defaults,
+from .models import (ADDRESS_PARTS, FRACTION_FIELDS, MAX_FRACTIONS, REQUIRED, TAX_ID_FIELDS, Model, defaults,
                      format_tax_id, normalize_fields, prepare)
 from .storage import Storage, atomic_write, matches_history, pdf_stem
 
@@ -358,6 +358,9 @@ class App:
         style.configure("Accent.TButton", foreground="#ffffff", focuscolor="#ffffff")
         style.map("Accent.TButton", foreground=[("disabled", "#ffffff"), ("active", "#ffffff")])
         style.configure("TEntry", padding=(8, 6), fieldbackground=T.paper, bordercolor=T.line)
+        style.configure("Form.TEntry", padding=(7, 4))
+        style.configure("TCheckbutton", background=T.paper)
+        style.map("TCheckbutton", background=[("active", T.tint)])
         style.configure("TSpinbox", padding=(8, 6), fieldbackground=T.paper, bordercolor=T.line)
         style.configure("TRadiobutton", background=T.paper, foreground=T.ink)
         style.map("TRadiobutton", background=[("active", T.tint)])
@@ -368,7 +371,7 @@ class App:
         style.map("Treeview", background=[("selected", T.active)], foreground=[("selected", T.ink)])
 
     def topbar(self):
-        header = tk.Frame(self.root, bg=T.paper, padx=18, pady=7)
+        header = self.header = tk.Frame(self.root, bg=T.paper, padx=18, pady=7)
         header.pack(fill="x")
         header.columnconfigure(1, weight=1)
         logo = Path(__file__).with_name("assets") / "municipio.png"
@@ -388,7 +391,7 @@ class App:
         label(brand, "PREFEITURA DE BIQUINHAS", 8, fg=T.muted).pack(anchor="w")
         ttk.Button(header, text="⚙  Configurações", command=self.settings).grid(row=0, column=2, sticky="e")
 
-        nav = tk.Frame(self.root, bg=T.nav, padx=16, pady=4)
+        nav = self.nav = tk.Frame(self.root, bg=T.nav, padx=16, pady=4)
         nav.pack(fill="x")
         links = [("Início", self.dashboard),
                  ("Desdobro", lambda: self.open_kind("desdobro")),
@@ -401,7 +404,8 @@ class App:
             button.pack(side="left", padx=(0, 4))
             self.nav_buttons[name] = button
         ttk.Button(nav, text="Modelos e dados ▾", style="Nav.TButton", command=self.utility_menu).pack(side="right")
-        tk.Frame(self.root, bg=T.line, height=1).pack(fill="x")
+        self.nav_rule = tk.Frame(self.root, bg=T.line, height=1)
+        self.nav_rule.pack(fill="x")
 
     def open_kind(self, kind):
         model = next((model for model in self.store.models() if model.kind == kind), None)
@@ -481,12 +485,30 @@ class App:
         if self.scroll and str(event.widget).startswith(str(self.scroll)):
             self.scroll.wheel(event)
 
-    def page(self, active, kicker, title, description):
+    def page(self, active, kicker, title, description, *, compact=False):
         for child in self.main.winfo_children():
             child.destroy()
         self.scroll = None
         for name, button in self.nav_buttons.items():
             button.configure(style="Selected.Nav.TButton" if name == active else "Nav.TButton")
+        for bar in (self.header, self.nav, self.nav_rule):
+            if compact:
+                bar.pack_forget()
+            elif not bar.winfo_manager():
+                bar.pack(fill="x", before=self.main)
+        if compact:
+            header = tk.Frame(self.main, bg=T.paper, padx=13, pady=7)
+            header.pack(fill="x")
+            ttk.Button(header, text="Menu ▾", style="Nav.TButton",
+                       command=self.form_menu).pack(side="right", padx=(8, 0))
+            steps = tk.Frame(header, bg=T.paper)
+            steps.pack(side="right")
+            label(steps, "01 Preencher", 9, bold=True, fg=T.accent, bg=T.tint,
+                  padx=7, pady=4).pack(side="left")
+            label(steps, "  02 Revisar   03 Arquivar", 9, fg=T.muted).pack(side="left")
+            label(header, title, 14, bold=True, wraplength=285, justify="left").pack(side="left", fill="x")
+            tk.Frame(self.main, bg=T.line, height=1).pack(fill="x")
+            return
         header = tk.Frame(self.main, bg=T.paper, padx=20, pady=11)
         header.pack(fill="x")
         label(header, kicker.upper(), 8, bold=True, fg=T.accent).pack(anchor="w")
@@ -496,6 +518,33 @@ class App:
         header.bind("<Configure>", lambda event: description_label.configure(
             wraplength=max(120, min(730, event.width - 40))))
         tk.Frame(self.main, bg=T.line, height=1).pack(fill="x")
+
+    def form_menu(self):
+        if self.busy:
+            return
+        menu = tk.Menu(self.root, tearoff=False)
+        menu.add_command(label="Início", command=self.dashboard)
+        menu.add_command(label="Histórico", command=self.history)
+        menu.add_separator()
+        menu.add_command(label="Configurações", command=self.settings)
+        menu.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
+
+    def link_address(self, container, linked, pairs, entries):
+        def sync(*_):
+            for source, target in pairs:
+                if linked.get():
+                    self.form_vars[target].set(self.form_vars[source].get())
+                entries[target].configure(state="readonly" if linked.get() else "normal")
+
+        traces = [(variable, variable.trace_add("write", sync)) for variable in
+                  [linked, *(self.form_vars[source] for source, _ in pairs)]]
+
+        def cleanup(_):
+            for variable, trace in traces:
+                variable.trace_remove("write", trace)
+
+        container.bind("<Destroy>", cleanup, add="+")
+        sync()
 
     def scroll_page(self):
         self.scroll = ScrollArea(self.main)
@@ -556,44 +605,60 @@ class App:
     def form(self, model, previous=None):
         record_id = previous["record_id"] if previous else None
         active = {"desdobro": "Desdobro", "retificacao": "Retificação", "avaliacao": "Avaliação"}.get(model.kind)
-        self.page(active, "Emissão de documentos", model.title,
-                  "Os campos com * são obrigatórios. Confira o PDF antes de salvar.")
-        workflow(self.main, 1).pack(fill="x")
-        footer = tk.Frame(self.main, bg=T.paper, padx=26, pady=10)
+        self.page(active, "Emissão de documentos", model.title, "", compact=True)
+        footer = tk.Frame(self.main, bg=T.paper, padx=14, pady=6)
         footer.pack(side="bottom", fill="x")
-        self.form_status = label(footer, "", fg=T.muted)
+        self.form_status = label(footer, "Campos com * são obrigatórios.", 9, fg=T.muted)
         self.form_status.pack(side="left")
-        body = self.scroll_page()
+        self.scroll = ScrollArea(self.main)
+        self.scroll.pack(fill="both", expand=True, padx=(13, 9), pady=7)
+        body = self.scroll.body
         values = json.loads(previous["form"]) if previous else defaults()
         self.form_vars = {}
+        entries = {}
         reference = tk.StringVar(value=previous["reference"] if previous else "")
         groups = model.groups()
-        if not any("NumeroDocumento" in group for group in groups.values()):
-            box = self.card(body, "Identificação do documento")
-            label(box, "Número do documento (opcional)", fg=T.muted).pack(anchor="w", pady=(6, 4))
-            label(box, "Exemplo: 001. O número informado aparece no nome do PDF.", 9,
-                  fg=T.muted).pack(anchor="w", pady=(0, 6))
-            ttk.Entry(box, textvariable=reference, width=36).pack(anchor="w")
+        available = {key for group in groups.values() for key in group}
+        pairs = [(f"{part}Residencial", f"{part}Imovel") for part in ADDRESS_PARTS
+                 if {f"{part}Residencial", f"{part}Imovel"} <= available]
+        self.address_link = tk.BooleanVar(value=values.get("_EnderecoCompartilhado") == "1") if pairs else None
+        if "NumeroDocumento" not in available:
+            groups = dict(groups)
+            groups["Emissão"] = {"_Referencia": "Número do documento (opcional)", **groups.get("Emissão", {})}
+            groups = {"Emissão": groups.pop("Emissão"), **groups}
         for group, fields in groups.items():
-            box = self.card(body, "Imóvel de origem" if group == "Imóvel" and model.kind == "desdobro" else group)
+            title = "Imóvel de origem" if group == "Imóvel" and model.kind == "desdobro" else group
+            box = tk.Frame(body, bg=T.paper, highlightbackground=T.line, highlightthickness=1, padx=11, pady=6)
+            box.pack(fill="x", padx=(0, 5), pady=(0, 5))
+            label(box, title, 11, bold=True).pack(anchor="w")
+            if group == "Endereço residencial" and self.address_link is not None:
+                ttk.Checkbutton(box, text="Usar o endereço do contribuinte no imóvel",
+                                variable=self.address_link).pack(anchor="w", pady=(3, 0))
             grid = tk.Frame(box, bg=T.paper)
-            grid.pack(fill="x", pady=(7, 0))
+            grid.pack(fill="x", pady=(4, 0))
             for col in range(3):
                 grid.columnconfigure(col, weight=1, uniform="form")
             for index, (key, caption) in enumerate(fields.items()):
                 row, col = divmod(index, 3)
-                variable = tk.StringVar(value=values.get(key, ""))
-                self.form_vars[key] = variable
+                variable = reference if key == "_Referencia" else tk.StringVar(value=values.get(key, ""))
+                if key != "_Referencia":
+                    self.form_vars[key] = variable
                 cell = tk.Frame(grid, bg=T.paper)
-                cell.grid(row=row, column=col, sticky="ew", padx=(0, 11), pady=(0, 8))
+                cell.grid(row=row, column=col, sticky="ew", padx=(0, 7), pady=(0, 3))
                 if key == "LogradouroImovel" and model.kind == "retificacao":
                     caption = "Nome da rua"
                 required = " *" if key in REQUIRED.get(model.kind, ()) else ""
-                label(cell, caption + required, 9, bold=True, wraplength=195, justify="left").pack(anchor="w", pady=(0, 4))
-                entry = ttk.Entry(cell, textvariable=variable, width=10)
+                caption_label = label(cell, caption + required, 9, bold=True, wraplength=195, justify="left")
+                caption_label.pack(fill="x", pady=(0, 2))
+                cell.bind("<Configure>", lambda event, caption=caption_label:
+                          caption.configure(wraplength=max(50, event.width)))
+                entry = ttk.Entry(cell, textvariable=variable, width=9, style="Form.TEntry")
+                entries[key] = entry
                 entry.pack(fill="x")
                 if key in TAX_ID_FIELDS:
                     mask_tax_id(entry, variable)
+        if pairs:
+            self.link_address(body, self.address_link, pairs, entries)
         self.fraction_vars = []
         self.active_fractions = 0
         if model.has_fractions():
@@ -642,6 +707,8 @@ class App:
             if model.has_fractions() and (not self.count.get().isdigit() or int(self.count.get()) != self.active_fractions):
                 raise ValueError(f"Informe entre 1 e {MAX_FRACTIONS} frações.")
             values = normalize_fields({key: var.get() for key, var in self.form_vars.items()})
+            if self.address_link is not None:
+                values["_EnderecoCompartilhado"] = "1" if self.address_link.get() else "0"
             fractions = [{key: var.get().strip() for key, var in row.items()}
                          for row in self.fraction_vars[:self.active_fractions]]
             filled = prepare(model, values, fractions)
