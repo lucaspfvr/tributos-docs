@@ -2,9 +2,9 @@
 
 Automação de processos documentais para o setor de tributos.
 
-## Etapa 06
+## Etapa 07
 
-Paletas selecionáveis e nomes de PDFs derivados do tipo, número e proprietário.
+Controles da interface, máscara de CPF/CNPJ e normalização do proprietário.
 
 Esta é uma etapa da reconstrução incremental do projeto. Os documentos de exemplo são demonstrativos e sem validade.
 

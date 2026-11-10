@@ -11,22 +11,58 @@ from dataclasses import astuple
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font, messagebox, ttk
 from uuid import uuid4
 
 from .appearance import DEFAULT_THEME, PALETTES
+from .controls import CommandControls
 from .docx import export_pdf
-from .models import FRACTION_FIELDS, MAX_FRACTIONS, REQUIRED, Model, defaults, prepare
+from .models import (FRACTION_FIELDS, MAX_FRACTIONS, REQUIRED, TAX_ID_FIELDS, Model, defaults,
+                     format_tax_id, normalize_fields, prepare)
 from .storage import Storage, atomic_write, matches_history, pdf_stem
 
 T = PALETTES[DEFAULT_THEME]
 FONT = "Segoe UI" if sys.platform == "win32" else "DejaVu Sans"
+APP_TITLE = "Setor de Tributos e Arrecadação - Documentos"
 
 
 def label(parent, text, size=10, *, bold=False, fg=None, bg=None, anchor="w", **kwargs):
     return tk.Label(parent, text=text, fg=fg or T.ink, bg=bg or T.paper, anchor=anchor,
                     font=(FONT, size, "bold" if bold else "normal"), **kwargs)
 
+
+
+def mask_tax_id(entry, variable):
+    pending = None
+
+    def update():
+        nonlocal pending
+        value = variable.get()
+        formatted = format_tax_id(value, partial=True)
+        if formatted != value:
+            cursor = entry.index("insert")
+            digits = sum("0" <= char <= "9" for char in value[:cursor])
+            position = 0
+            while digits and position < len(formatted):
+                digits -= "0" <= formatted[position] <= "9"
+                position += 1
+            variable.set(formatted)
+            entry.icursor(len(formatted) if cursor == len(value) else position)
+        pending = None
+
+    def schedule(*_):
+        nonlocal pending
+        if pending is None:
+            pending = entry.after_idle(update)
+
+    def cleanup(_):
+        variable.trace_remove("write", trace)
+        if pending is not None:
+            entry.after_cancel(pending)
+
+    trace = variable.trace_add("write", schedule)
+    entry.bind("<Destroy>", cleanup, add="+")
+    schedule()
 
 
 def workflow(parent, active):
@@ -110,7 +146,7 @@ class ScrollArea(tk.Frame):
 
 
 class Preview(tk.Toplevel):
-    def __init__(self, parent, data, title, destination, suggested, details, save):
+    def __init__(self, parent, data, title, destination, suggested, details, save, controls):
         import pypdfium2
         from PIL import ImageTk
 
@@ -131,15 +167,15 @@ class Preview(tk.Toplevel):
 
         header = tk.Frame(self, bg=T.paper, padx=18, pady=10)
         header.pack(fill="x")
-        label(header, "TRIBUTOS DOCS  /  REVISÃO", 9, bold=True, fg=T.accent).pack(anchor="w")
+        label(header, "REVISÃO DO DOCUMENTO", 9, bold=True, fg=T.accent).pack(anchor="w")
         label(header, title, 17, bold=True).pack(anchor="w", pady=(2, 0))
         workflow(self, 2).pack(fill="x")
 
         toolbar = tk.Frame(self, bg=T.paper, padx=18, pady=8)
         toolbar.pack(fill="x")
         ttk.Button(toolbar, text="Voltar", command=self.close).pack(side="left")
-        ttk.Button(toolbar, text="Salvar PDF", style="Accent.TButton", command=self.confirm).pack(side="right")
-        ttk.Button(toolbar, text="Imprimir", command=self.print_document).pack(side="right", padx=8)
+        controls.button(toolbar, "Salvar PDF", "save", self.confirm, primary=True).pack(side="right")
+        controls.button(toolbar, "Imprimir", "print", self.print_document).pack(side="right", padx=8)
         self.bind("<Control-s>", lambda _: self.confirm())
         self.bind("<Control-p>", lambda _: self.print_document())
 
@@ -291,12 +327,13 @@ class App:
         self.busy = False
         self.scroll = None
         self.nav_buttons = {}
-        self.root.title("Tributos Docs | Prefeitura Municipal de Biquinhas")
+        self.root.title(APP_TITLE)
         self.root.configure(bg=T.bg)
         width, height = self.root.maxsize()
         self.root.geometry(f"{min(1190, width - 24)}x{min(770, height - 38)}+12+12")
-        self.root.minsize(785, 530)
+        self.root.minsize(640, 420)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.controls = CommandControls(root)
         self.style()
         self.topbar()
         footer = tk.Frame(root, bg=T.nav, padx=24, pady=6)
@@ -311,35 +348,47 @@ class App:
     def style(self):
         style = ttk.Style(self.root)
         style.theme_use("clam")
+        self.controls.style(style, T)
         style.configure(".", font=(FONT, 10), foreground=T.ink)
-        style.configure("TButton", padding=(13, 8), background=T.paper, bordercolor=T.line, focuscolor=T.accent)
-        style.configure("Nav.TButton", background=T.nav, bordercolor=T.nav, padding=(12, 8))
-        style.configure("Selected.Nav.TButton", background=T.active, bordercolor=T.active, foreground=T.accent, font=(FONT, 10, "bold"))
-        style.map("TButton", background=[("active", T.tint)])
-        style.configure("Accent.TButton", background=T.accent, foreground="#ffffff", bordercolor=T.accent)
-        style.map("Accent.TButton", background=[("disabled", T.muted), ("active", T.hover)],
-                  foreground=[("disabled", "#ffffff"), ("active", "#ffffff")])
+        style.configure("TButton", padding=(13, 8), foreground=T.accent, font=(FONT, 10, "bold"),
+                        focuscolor=T.accent)
+        style.configure("Nav.TButton", padding=(9, 7), width=-1, foreground=T.ink, font=(FONT, 10))
+        style.configure("Selected.Nav.TButton", foreground=T.accent, font=(FONT, 10, "bold"))
+        style.map("TButton", foreground=[("disabled", T.muted)])
+        style.configure("Accent.TButton", foreground="#ffffff", focuscolor="#ffffff")
+        style.map("Accent.TButton", foreground=[("disabled", "#ffffff"), ("active", "#ffffff")])
         style.configure("TEntry", padding=(8, 6), fieldbackground=T.paper, bordercolor=T.line)
         style.configure("TSpinbox", padding=(8, 6), fieldbackground=T.paper, bordercolor=T.line)
         style.configure("TRadiobutton", background=T.paper, foreground=T.ink)
         style.map("TRadiobutton", background=[("active", T.tint)])
-        style.configure("Treeview", rowheight=35, background=T.paper, fieldbackground=T.paper, bordercolor=T.line)
+        line_height = font.nametofont("TkDefaultFont", root=self.root).metrics("linespace")
+        style.configure("Treeview", rowheight=max(31, line_height + 12), background=T.paper,
+                        fieldbackground=T.paper, bordercolor=T.line)
         style.configure("Treeview.Heading", padding=(8, 9), background=T.tint, font=(FONT, 9, "bold"))
         style.map("Treeview", background=[("selected", T.active)], foreground=[("selected", T.ink)])
 
     def topbar(self):
-        header = tk.Frame(self.root, bg=T.paper, padx=24, pady=9)
+        header = tk.Frame(self.root, bg=T.paper, padx=18, pady=7)
         header.pack(fill="x")
+        header.columnconfigure(1, weight=1)
         logo = Path(__file__).with_name("assets") / "municipio.png"
         self.logo = tk.PhotoImage(file=str(logo))
-        tk.Label(header, image=self.logo, bg=T.paper).pack(side="left", padx=(0, 9))
+        self.root.iconphoto(True, self.logo)
+        if sys.platform == "win32":
+            try:
+                self.root.iconbitmap(default=str(logo.with_suffix(".ico")))
+            except tk.TclError:
+                pass
+        tk.Label(header, image=self.logo, bg=T.paper).grid(row=0, column=0, padx=(0, 9))
         brand = tk.Frame(header, bg=T.paper)
-        brand.pack(side="left")
-        label(brand, "Tributos Docs", 18, bold=True).pack(anchor="w")
+        brand.grid(row=0, column=1, sticky="ew", padx=(0, 10))
+        title = label(brand, APP_TITLE, 15, bold=True, justify="left", wraplength=435)
+        title.pack(fill="x")
+        brand.bind("<Configure>", lambda event: title.configure(wraplength=max(80, event.width)))
         label(brand, "PREFEITURA DE BIQUINHAS", 8, fg=T.muted).pack(anchor="w")
-        ttk.Button(header, text="⚙  Configurações", command=self.settings).pack(side="right")
+        ttk.Button(header, text="⚙  Configurações", command=self.settings).grid(row=0, column=2, sticky="e")
 
-        nav = tk.Frame(self.root, bg=T.nav, padx=22, pady=5)
+        nav = tk.Frame(self.root, bg=T.nav, padx=16, pady=4)
         nav.pack(fill="x")
         links = [("Início", self.dashboard),
                  ("Desdobro", lambda: self.open_kind("desdobro")),
@@ -438,11 +487,14 @@ class App:
         self.scroll = None
         for name, button in self.nav_buttons.items():
             button.configure(style="Selected.Nav.TButton" if name == active else "Nav.TButton")
-        header = tk.Frame(self.main, bg=T.paper, padx=27, pady=16)
+        header = tk.Frame(self.main, bg=T.paper, padx=20, pady=11)
         header.pack(fill="x")
         label(header, kicker.upper(), 8, bold=True, fg=T.accent).pack(anchor="w")
         label(header, title, 22, bold=True).pack(anchor="w", pady=(4, 3))
-        label(header, description, 10, fg=T.muted, wraplength=655, justify="left").pack(anchor="w")
+        description_label = label(header, description, 10, fg=T.muted, wraplength=595, justify="left")
+        description_label.pack(fill="x")
+        header.bind("<Configure>", lambda event: description_label.configure(
+            wraplength=max(120, min(730, event.width - 40))))
         tk.Frame(self.main, bg=T.line, height=1).pack(fill="x")
 
     def scroll_page(self):
@@ -538,7 +590,10 @@ class App:
                     caption = "Nome da rua"
                 required = " *" if key in REQUIRED.get(model.kind, ()) else ""
                 label(cell, caption + required, 9, bold=True, wraplength=195, justify="left").pack(anchor="w", pady=(0, 4))
-                ttk.Entry(cell, textvariable=variable, width=10).pack(fill="x")
+                entry = ttk.Entry(cell, textvariable=variable, width=10)
+                entry.pack(fill="x")
+                if key in TAX_ID_FIELDS:
+                    mask_tax_id(entry, variable)
         self.fraction_vars = []
         self.active_fractions = 0
         if model.has_fractions():
@@ -586,7 +641,7 @@ class App:
         try:
             if model.has_fractions() and (not self.count.get().isdigit() or int(self.count.get()) != self.active_fractions):
                 raise ValueError(f"Informe entre 1 e {MAX_FRACTIONS} frações.")
-            values = {key: var.get().strip() for key, var in self.form_vars.items()}
+            values = normalize_fields({key: var.get() for key, var in self.form_vars.items()})
             fractions = [{key: var.get().strip() for key, var in row.items()}
                          for row in self.fraction_vars[:self.active_fractions]]
             filled = prepare(model, values, fractions)
@@ -613,7 +668,7 @@ class App:
 
                 preview = Preview(self.root, data, model.title, self.store.destination(model.kind),
                                   f"{stem}.pdf" if number else "PDF com número automático",
-                                  review_details(model, values, fractions, number), archive)
+                                  review_details(model, values, fractions, number), archive, self.controls)
                 self.root.wait_window(preview)
                 if preview.saved:
                     rid, version, path = preview.saved
@@ -643,33 +698,54 @@ class App:
 
     def history(self):
         self.page("Histórico", "Arquivo local", "Histórico de documentos",
-                  "PDFs encontrados nas pastas do repositório. Pesquise pelo nome do arquivo, tipo, proprietário ou referência.")
-        body = tk.Frame(self.main, bg=T.bg, padx=26, pady=16)
+                  "Pesquise no repositório e selecione um documento para abrir ou corrigir.")
+        body = tk.Frame(self.main, bg=T.bg, padx=20, pady=9)
         body.pack(fill="both", expand=True)
         query = tk.StringVar()
         searchbar = tk.Frame(body, bg=T.bg)
-        searchbar.pack(fill="x", pady=(0, 10))
+        searchbar.pack(fill="x", pady=(0, 6))
         label(searchbar, "Pesquisar", 9, bold=True, bg=T.bg).pack(side="left")
-        ttk.Entry(searchbar, textvariable=query, width=35).pack(side="left", padx=8)
-        ttk.Button(searchbar, text="Abrir pastas", command=lambda: self.safe(
+        self.controls.button(searchbar, "Abrir pastas", "folder", lambda: self.safe(
             lambda: open_path(self.store.archive))).pack(side="right")
-        ttk.Button(searchbar, text="Atualizar", command=lambda: reload_archive()).pack(side="right", padx=5)
+        self.controls.button(searchbar, "Atualizar", "refresh", lambda: reload_archive()).pack(side="right", padx=5)
+        ttk.Entry(searchbar, textvariable=query, width=16).pack(side="left", padx=8, fill="x", expand=True)
+
+        actions = tk.Frame(body, bg=T.bg)
+        actions.pack(fill="x", pady=(0, 7))
+        open_button = self.controls.button(actions, "Abrir PDF", "open", lambda: selected(show_pdf),
+                                           state="disabled")
+        open_button.pack(side="left")
+        edit_button = self.controls.button(actions, "Corrigir documento", "edit",
+                                           lambda: selected(correct), primary=True, state="disabled")
+        edit_button.pack(side="left", padx=8)
+        status = label(actions, "", 9, fg=T.muted, bg=T.bg)
+        status.pack(side="right", padx=(4, 0))
+
         panel = tk.Frame(body, bg=T.bg)
         panel.pack(fill="both", expand=True)
-        columns = [("code", "Código / rev.", 121), ("reference", "Nº / referência", 113),
-                   ("owner", "Proprietário", 166), ("model", "Arquivo / tipo", 210), ("date", "Emissão", 100)]
-        table = ttk.Treeview(panel, columns=[x[0] for x in columns], show="headings", selectmode="browse")
-        bar = ttk.Scrollbar(panel, command=table.yview)
-        table.configure(yscrollcommand=bar.set)
-        bar.pack(fill="y", side="right")
-        table.pack(fill="both", expand=True)
+        columns = [("code", "Código / rev.", 112), ("reference", "Nº / referência", 105),
+                   ("owner", "Proprietário", 138), ("model", "Arquivo / tipo", 156), ("date", "Emissão", 85)]
+        table = ttk.Treeview(panel, columns=[x[0] for x in columns], show="headings",
+                             selectmode="browse", height=3)
+        vertical = ttk.Scrollbar(panel, orient="vertical", command=table.yview)
+        horizontal = ttk.Scrollbar(panel, orient="horizontal", command=table.xview)
+        table.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        panel.columnconfigure(0, weight=1)
+        panel.rowconfigure(0, weight=1)
+        table.grid(row=0, column=0, sticky="nsew")
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal.grid(row=1, column=0, sticky="ew")
         for key, heading, width in columns:
             table.heading(key, text=heading, anchor="w")
             table.column(key, width=width, minwidth=70, stretch=key in {"owner", "model"})
-        status = label(body, "", fg=T.muted, bg=T.bg)
-        status.pack(anchor="w", pady=(8, 0))
 
         rows, documents = {}, []
+
+        def sync_actions(_=None):
+            selection = table.selection()
+            row = rows.get(selection[0]) if selection else None
+            open_button.configure(state="normal" if row else "disabled")
+            edit_button.configure(state="normal" if row and row["record_id"] is not None else "disabled")
 
         def reload_archive():
             try:
@@ -680,6 +756,8 @@ class App:
             refresh()
 
         def refresh(*_):
+            selection = table.selection()
+            previous = rows.get(selection[0]) if selection else None
             table.delete(*table.get_children())
             rows.clear()
             try:
@@ -693,9 +771,13 @@ class App:
                         row["reference"] or "—", row["owner"] or "—",
                         row["title"] if rid else row["path"].name,
                         date.fromisoformat(row["created"][:10]).strftime("%d/%m/%Y")))
-                status.configure(text=f"{len(rows)} PDF(s) encontrado(s)")
+                    if previous and previous["path"] == row["path"]:
+                        table.selection_set(str(index))
+                        table.focus(str(index))
+                status.configure(text=f"{len(rows)} PDF(s)")
             except Exception as exc:
                 status.configure(text=str(exc))
+            sync_actions()
 
         def selected(action):
             selection = table.selection()
@@ -711,6 +793,8 @@ class App:
             if row["record_id"] is None:
                 raise ValueError("Este PDF foi adicionado pela pasta e não possui formulário registrado.")
             record = self.store.record(row["record_id"], row["version"])
+            if record is None:
+                raise ValueError("A revisão não está mais disponível. Clique em Atualizar.")
             self.form(Model(record["model_id"], record["title"], record["kind"], record["document"]), record)
 
         def show_pdf(row):
@@ -719,12 +803,9 @@ class App:
             open_path(row["path"])
 
         query.trace_add("write", refresh)
-        table.bind("<Double-1>", lambda _: selected(show_pdf))
-        actions = tk.Frame(body, bg=T.bg)
-        actions.pack(fill="x", pady=(10, 0))
-        ttk.Button(actions, text="Abrir PDF", command=lambda: selected(show_pdf)).pack(side="left")
-        ttk.Button(actions, text="Corrigir e gerar nova revisão", style="Accent.TButton",
-                   command=lambda: selected(correct)).pack(side="left", padx=8)
+        table.bind("<<TreeviewSelect>>", sync_actions)
+        table.bind("<Return>", lambda _: selected(show_pdf))
+        table.bind("<Double-1>", lambda event: selected(show_pdf) if table.identify_row(event.y) else None)
         reload_archive()
 
     def models(self):

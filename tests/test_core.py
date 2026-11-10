@@ -10,7 +10,7 @@ import pypdfium2 as pdfium
 from lxml import etree
 
 from tributos.docx import W, export_pdf, replace_tags, write_package, xml
-from tributos.models import Model, defaults, prepare
+from tributos.models import Model, defaults, format_tax_id, prepare
 from tributos.storage import Storage
 
 
@@ -72,6 +72,25 @@ class ProjectTest(unittest.TestCase):
                     self.assertIn("60.000,00", text)
                     self.assertIn("999,14", text)
                     self.assertIn("TESTE-02", text)
+
+    def test_tax_id_mask_and_uppercase_owners_in_generated_document(self):
+        self.assertEqual(format_tax_id("1234567", partial=True), "123.456.7")
+        self.assertEqual(format_tax_id("123.456.789-012", partial=True), "12.345.678/9012")
+        self.assertEqual(format_tax_id("12345678901"), "123.456.789-01")
+        self.assertEqual(format_tax_id("12345678000199"), "12.345.678/0001-99")
+        self.assertEqual(format_tax_id("12.ABC.345/0001-99"), "12.ABC.345/0001-99")
+        fields = dict(self.fields, NomeProprietario="Lúcia da Silva", CpfCnpj="12345678901",
+                      NomeProprietario2="José D’Ávila", CpfCnpj2="12345678000199")
+        for kind, model in self.models.items():
+            with self.subTest(kind=kind):
+                filled = prepare(model, fields, self.fractions)
+                with ZipFile(io.BytesIO(filled)) as package:
+                    text = "".join(xml(package.read("word/document.xml")).itertext())
+                self.assertIn("LÚCIA DA SILVA", text)
+                self.assertIn("123.456.789-01", text)
+                if kind == "desdobro":
+                    self.assertIn("JOSÉ D’ÁVILA", text)
+                    self.assertIn("12.345.678/0001-99", text)
 
     def test_new_key_in_split_word_runs_and_history(self):
         model = self.models["desdobro"]

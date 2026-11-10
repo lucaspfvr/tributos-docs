@@ -52,6 +52,7 @@ DERIVED = {"Fracoes", "QuantidadeFracoes", "DescricaoFracoes", "SegundoProprieta
 FRACTION_FIELDS = {"lote": "Lote / identificação", "area": "Área total (m²)",
                    "endereco": "Logradouro completo", "numero": "Número"}
 MAX_FRACTIONS = 99
+TAX_ID_FIELDS = {"CpfCnpj", "CpfCnpj2"}
 
 
 @dataclass(frozen=True)
@@ -105,9 +106,38 @@ def number_br(value, label, *, positive=False):
     return format(amount, ",.2f").translate(str.maketrans(",.", ".,"))
 
 
+def format_tax_id(value, *, partial=False):
+    if not re.fullmatch(r"[0-9.\-/\s]*", value):
+        return value
+    digits = re.sub(r"[^0-9]", "", value)
+    if len(digits) > 14 or (not partial and len(digits) not in (11, 14)):
+        return value
+    is_cnpj = len(digits) > 11 or (partial and "/" in value)
+    sizes, separators = ((2, 3, 3, 4, 2), (".", ".", "/", "-")) if is_cnpj else ((3, 3, 3, 2), (".", ".", "-"))
+    groups = []
+    for size in sizes:
+        if not digits:
+            break
+        groups.append(digits[:size])
+        digits = digits[size:]
+    if not groups:
+        return ""
+    return groups[0] + "".join(separator + group for separator, group in zip(separators, groups[1:]))
+
+
+def normalize_fields(fields):
+    values = {key: value.strip() for key, value in fields.items()}
+    for key in ("NomeProprietario", "NomeProprietario2"):
+        if key in values:
+            values[key] = values[key].upper()
+    for key in TAX_ID_FIELDS & values.keys():
+        values[key] = format_tax_id(values[key])
+    return values
+
+
 def prepare(model, fields, fractions):
     keys = set(model.keys())
-    values = {key: value.strip() for key, value in fields.items()}
+    values = normalize_fields(fields)
     for group in model.groups().values():
         for key, label in group.items():
             if key in REQUIRED.get(model.kind, ()) and not values.get(key):

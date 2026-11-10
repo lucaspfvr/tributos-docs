@@ -1,0 +1,97 @@
+"""Rounded ttk command controls and monochrome icons."""
+
+import tkinter as tk
+from tkinter import ttk
+
+ICONS = {
+    "open": (
+        "................", "..########......", "..#......##.....", "..#......#.#....",
+        "..#......####...", "..#.........#...", "..#.........#...", "..#....###..#...",
+        "..#.....#...#...", "..#....#....#...", "..#...#.....#...", "..#.........#...",
+        "..###########...", "................",
+    ),
+    "edit": (
+        "................", "..........##....", ".........#..#...", "........#....#..",
+        ".......#....#...", "......#....#....", ".....#....#.....", "....#....#......",
+        "...#....#.......", "...#...#........", "...#.##.........", "...##...........",
+        "...#..########..", "................",
+    ),
+    "folder": (
+        "................", "................", "..#####.........", "..#....#######..",
+        "..#..........#..", "..############..", "..#..........#..", "..#..........#..",
+        "..#..........#..", "..#..........#..", "..#..........#..", "..############..",
+        "................", "................",
+    ),
+    "refresh": (
+        "................", ".....######.....", "....#......#....", "...#........#...",
+        "..#.........##..", "..#.......####..", "..#.............", ".............#..",
+        "..####.......#..", "..##.........#..", "...#........#...", "....#......#....",
+        ".....######.....", "................",
+    ),
+    "save": (
+        "................", ".......##.......", ".......##.......", ".......##.......",
+        ".......##.......", "....#..##..#....", ".....#.##.#.....", "......####......",
+        ".......##.......", "..#..........#..", "..#..........#..", "..#..........#..",
+        "..############..", "................",
+    ),
+    "print": (
+        "................", "....########....", "....#......#....", "....#......#....",
+        "..############..", "..#..........#..", "..#........#.#..", "..#..........#..",
+        "..####....####..", "....#......#....", "....#......#....", "....########....",
+        "................", "................",
+    ),
+}
+
+
+class CommandControls:
+    def __init__(self, root):
+        self.root = root
+        self.surfaces = {}
+        self.icons = {}
+
+    def style(self, style, palette):
+        secondary = ((palette.paper, palette.accent), (palette.tint, palette.accent),
+                     (palette.active, palette.accent), (palette.bg, palette.line))
+        primary = ((palette.accent, palette.accent), (palette.hover, palette.hover),
+                   (palette.hover, palette.hover), (palette.muted, palette.muted))
+        navigation = ((palette.nav, palette.nav), (palette.tint, palette.line),
+                      (palette.active, palette.line), (palette.nav, palette.nav))
+        selected = ((palette.active, palette.active), *navigation[1:])
+        for name, states in (("TButton", secondary), ("Accent.TButton", primary),
+                             ("Nav.TButton", navigation), ("Selected.Nav.TButton", selected)):
+            if name not in self.surfaces:
+                self.surfaces[name] = [tk.PhotoImage(master=self.root, width=19, height=19) for _ in states]
+                element = name.replace(".TButton", "").replace("TButton", "Secondary") + ".Surface"
+                normal, active, pressed, disabled = self.surfaces[name]
+                style.element_create(element, "image", normal, ("disabled", disabled),
+                                     ("pressed", pressed), ("active", active), border=6, sticky="nsew")
+                style.layout(name, [(element, {"sticky": "nsew", "children": [
+                    ("Button.focus", {"sticky": "nsew", "children": [
+                        ("Button.padding", {"sticky": "nsew", "children": [
+                            ("Button.label", {"sticky": "nsew"})]})]})]})])
+            for image, (fill, edge) in zip(self.surfaces[name], states):
+                image.blank()
+                self.rounded(image, edge, 0, 19, (4, 2, 1, 0))
+                self.rounded(image, fill, 1, 17, (4, 2, 1, 0))
+        for name, rows in ICONS.items():
+            for primary_icon, color in ((False, palette.accent), (True, "#ffffff")):
+                key = name, primary_icon
+                if key not in self.icons:
+                    self.icons[key] = tk.PhotoImage(master=self.root, width=16, height=16)
+                for y, row in enumerate(rows):
+                    for x, cell in enumerate(row):
+                        if cell == "#":
+                            self.icons[key].put(color, to=(x, y + 1))
+
+    @staticmethod
+    def rounded(image, color, offset, size, corner):
+        for row in range(size):
+            distance = min(row, size - row - 1)
+            inset = corner[distance] if distance < len(corner) else 0
+            left, right = offset + inset, offset + size - inset
+            image.put(color, to=(left, offset + row, right, offset + row + 1))
+
+    def button(self, parent, text, icon, command, *, primary=False, **kwargs):
+        return ttk.Button(parent, text=text, command=command, compound="left",
+                          image=self.icons[icon, primary], style="Accent.TButton" if primary else "TButton",
+                          **kwargs)
