@@ -2,9 +2,9 @@
 
 Automação de processos documentais para o setor de tributos.
 
-## Etapa 09
+## Etapa 10
 
-Painel inicial com documentos recentes, menu lateral e configurações agrupadas.
+Detalhes no histórico, animação da barra lateral e opção de instalar a Aptos.
 
 Esta é uma etapa da reconstrução incremental do projeto. Os documentos de exemplo são demonstrativos e sem validade.
 

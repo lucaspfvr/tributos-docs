@@ -9,7 +9,7 @@ from zipfile import ZipFile
 import pypdfium2 as pdfium
 from lxml import etree
 
-from tributos.docx import W, export_pdf, replace_tags, write_package, xml
+from tributos.docx import BERNARD, W, export_pdf, layout_font, replace_tags, write_package, xml
 from tributos.models import Model, defaults, format_tax_id, prepare
 from tributos.storage import Storage
 
@@ -63,7 +63,7 @@ class ProjectTest(unittest.TestCase):
                 if kind == "desdobro":
                     self.assertIn("04 frações", text)
                     self.assertIn("Lote 07-D", text)
-                    self.assertIn("778,44 m²", text)
+                    self.assertIn("778,44m²", text)
                     self.assertIn("nº 4", text)
                 elif kind == "retificacao":
                     self.assertIn("381,68", text)
@@ -104,11 +104,26 @@ class ProjectTest(unittest.TestCase):
             root = xml(output.read("word/document.xml"))
             self.assertIn("Quatrocentos e cinquenta mil reais.", "".join(root.itertext()))
             title = next(t for t in root.iter(W + "t") if t.text == "AVALIAÇÃO MUNICIPAL DE IMÓVEL")
-            fonts = title.getparent().find(f"{W}rPr/{W}rFonts")
-            self.assertEqual(fonts.get(W + "ascii"), "Times New Roman")
+            original_title = next(t for t in xml(original.read("word/document.xml")).iter(W + "t")
+                                  if t.text == title.text)
+            self.assertEqual(etree.tostring(title.getparent()), etree.tostring(original_title.getparent()))
+            self.assertEqual(layout_font(filled, "avaliacao"), "Aptos")
         filled = prepare(model, dict(fields, ValorAvaliacao="1.000.000,01"), [])
         with ZipFile(io.BytesIO(filled)) as output:
             self.assertIn("Um milhão de reais e um centavo.", "".join(xml(output.read("word/document.xml")).itertext()))
+
+    def test_desdobro_uses_original_header_and_inline_lot_styles(self):
+        model = self.models["desdobro"]
+        document = prepare(model, self.fields, [dict(row, numero="") for row in self.fractions])
+        self.assertEqual(layout_font(document, "desdobro"), BERNARD)
+        with ZipFile(io.BytesIO(document)) as filled, ZipFile(io.BytesIO(model.document)) as original:
+            self.assertEqual(filled.read("word/header1.xml"), original.read("word/header1.xml"))
+            body = xml(filled.read("word/document.xml"))
+            para = next(p for p in body.iter(W + "p") if "04 frações" in "".join(p.itertext()))
+            self.assertIn(" e Lote 07-D", "".join(para.itertext()))
+            self.assertFalse(list(para.iter(W + "br")))
+            lot = next(t for t in para.iter(W + "t") if t.text == "Lote 07-D")
+            self.assertIsNotNone(lot.getparent().find(f"{W}rPr/{W}b"))
 
     def test_new_key_in_split_word_runs_and_history(self):
         model = self.models["desdobro"]

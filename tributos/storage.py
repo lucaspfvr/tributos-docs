@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 import unicodedata
+from hashlib import sha256
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -26,6 +27,15 @@ CREATE TABLE IF NOT EXISTS revisions (
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY);
 """
+PREVIOUS_DESDOBRO = {"3f827801a2225a1ac42b3c9e68a8dd660a83f37bc373e09923e7b11eecb2ca38", "aba2e0a0fb2fa49ee54e05117b919da73afe5528f5a19ead6e5762c0c96bff38"}
+
+
+def current_desdobro(document):
+    if sha256(document).hexdigest() in PREVIOUS_DESDOBRO:
+        return Path(__file__).with_name("assets").joinpath("desdobro.docx").read_bytes()
+    return document
+
+
 APP_ID = 0x54524443
 FOLDERS = {"desdobro": "DESDOBRO", "retificacao": "RETIFICAÇÃO", "avaliacao": "AVALIAÇÃO"}
 UNSAFE_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -86,6 +96,18 @@ class Storage:
                     document = Path(__file__).with_name("assets").joinpath(kind + ".docx").read_bytes()
                     self.connection.execute("INSERT INTO models VALUES (?, ?, ?, ?)", (kind, title, kind, document))
                 self.connection.execute("PRAGMA user_version = 1")
+            else:
+                self.upgrade_stock_desdobro()
+
+    def upgrade_stock_desdobro(self):
+        row = self.connection.execute(
+            "SELECT document FROM models WHERE id = 'desdobro' AND kind = 'desdobro'").fetchone()
+        if row is not None:
+            old = row["document"]
+            new = current_desdobro(old)
+            if old != new:
+                self.connection.execute("UPDATE models SET document = ? WHERE id = 'desdobro' AND document = ?",
+                                        (new, old))
 
     def models(self):
         rows = self.connection.execute("SELECT id, title, kind, document FROM models ORDER BY title COLLATE NOCASE")
@@ -269,4 +291,5 @@ class Storage:
         self.connection.executescript(SCHEMA)
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
+            self.upgrade_stock_desdobro()
             self.copy_archived_pdfs()

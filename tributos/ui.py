@@ -8,18 +8,19 @@ import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from dataclasses import astuple
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import monotonic
 from tkinter import filedialog, font, messagebox, ttk
 from uuid import uuid4
 
 from .appearance import DEFAULT_THEME, PALETTES
 from .controls import CommandControls
-from .docx import export_pdf
+from .docx import export_pdf, layout_font
 from .models import (ADDRESS_PARTS, FRACTION_FIELDS, MAX_FRACTIONS, REQUIRED, TAX_ID_FIELDS, Model, defaults,
-                     format_tax_id, normalize_fields, prepare)
-from .storage import Storage, atomic_write, matches_history, pdf_stem
+                     format_tax_id, normalize_fields, number_br, prepare)
+from .storage import Storage, atomic_write, current_desdobro, matches_history, pdf_stem
 
 T = PALETTES[DEFAULT_THEME]
 FONT = "Segoe UI" if sys.platform == "win32" else "DejaVu Sans"
@@ -80,27 +81,71 @@ def workflow(parent, active):
     return strip
 
 
-def review_details(model, fields, fractions, reference):
-    street = fields.get("LogradouroImovel")
-    address = ", ".join(filter(None, (street, fields.get("NumeroImovel"))))
-    if not address and fractions:
-        addresses = dict.fromkeys(", ".join(filter(None, (row.get("endereco"), row.get("numero"))))
-                                  for row in fractions)
-        address = "\n".join(filter(None, addresses))
-    lots = ", ".join(row["lote"] for row in fractions)
-    area = fields.get("AreaTerreno") or fields.get("AreaMensurada")
-    if fractions:
-        total = sum(Decimal(row["area"].replace(".", "").replace(",", ".")) for row in fractions)
-        area = f"{total:,.2f}".translate(str.maketrans(",.", ".,")) + " m²"
-    elif area:
-        area += " m²"
-    return [
+def review_details(kind, fields, fractions, reference):
+    def joined(*keys, separator=" · "):
+        return separator.join(filter(None, (fields.get(key) for key in keys)))
+
+    def measure(value, prefix="", suffix=" m²"):
+        if not value:
+            return ""
+        try:
+            return prefix + number_br(value, "o valor") + suffix
+        except ValueError:
+            return str(value)
+
+    street = joined("LogradouroImovel", "NumeroImovel", "ComplementoImovel", separator=", ")
+    if kind == "retificacao" and street and not street.lower().startswith("rua "):
+        street = "Rua " + street
+    address = " · ".join(filter(None, (street, fields.get("BairroImovel"),
+                         joined("MunicipioImovel", "UfImovel", separator="/"))))
+    location = " · ".join(f"{label} {fields[key]}" for key, label in
+                          (("Quadra", "Quadra"), ("Lote", "Lote")) if fields.get(key))
+    details = [
         ("Nº do documento", reference),
-        ("Proprietário", fields.get("NomeProprietario")),
-        ("Endereço dos lotes" if fractions and not street else "Endereço", address),
-        ("Lotes resultantes", f"{len(fractions)} · {lots}" if lots else None),
-        ("Soma das áreas dos lotes" if fractions else "Área do imóvel", area),
+        ("Proprietário", joined("NomeProprietario", "NomeProprietario2", separator=" e ")),
     ]
+    if kind in {"desdobro", "retificacao", "avaliacao"}:
+        details.extend([
+            ("Lote de origem" if kind == "desdobro" else "Localização cadastral", location),
+            ("CIM do imóvel", fields.get("CimImovel")),
+            ("Matrícula", fields.get("Matricula")),
+            ("Endereço do imóvel", address),
+        ])
+    if kind == "retificacao":
+        details.append(("Área mensurada", measure(fields.get("AreaMensurada"))))
+    elif kind == "avaliacao":
+        details.extend([
+            ("Área do terreno", measure(fields.get("AreaTerreno"))),
+            ("Área construída", measure(fields.get("AreaConstruida"))),
+            ("Valor da avaliação", measure(fields.get("ValorAvaliacao"), "R$ ", "")),
+        ])
+    if fractions:
+        details.append(("Frações resultantes", str(len(fractions))))
+        total = Decimal(0)
+        complete = True
+        for index, row in enumerate(fractions, 1):
+            area = measure(row.get("area"))
+            try:
+                total += Decimal(row.get("area", "").replace(".", "").replace(",", "."))
+            except (InvalidOperation, AttributeError):
+                complete = False
+            lot = row.get("lote", "").strip()
+            caption = (lot if lot.casefold().startswith("lote ") else f"Lote {lot}") if lot else f"Fração {index}"
+            street = ", ".join(filter(None, (row.get("endereco"), row.get("numero"))))
+            details.append((caption, "\n".join(filter(None, (street, area)))))
+        if complete and total.is_finite():
+            details.append(("Soma das áreas dos lotes", f"{total:,.2f}".translate(str.maketrans(",.", ".,")) + " m²"))
+    return [(caption, value) for caption, value in details if value]
+
+
+def show_summary(body, details, width=225):
+    for caption, value in details:
+        cell = tk.Frame(body, bg=T.paper, padx=6, pady=6)
+        cell.pack(fill="x")
+        label(cell, caption, 9, fg=T.muted).pack(fill="x")
+        label(cell, value, 10, bold=True, wraplength=width, justify="left").pack(fill="x", pady=(2, 0))
+        tk.Frame(body, bg=T.line, height=1).pack(fill="x", padx=6)
+
 
 def open_path(path):
     if sys.platform == "win32":
@@ -130,19 +175,43 @@ class ScrollArea(tk.Frame):
     def __init__(self, parent, background=None):
         background = background or T.bg
         super().__init__(parent, bg=background)
-        self.canvas = tk.Canvas(self, bg=background, highlightthickness=0)
-        bar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas = tk.Canvas(self, bg=background, highlightthickness=0, yscrollincrement=18)
+        self.bar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.body = tk.Frame(self.canvas, bg=background)
-        window = self.canvas.create_window(0, 0, anchor="nw", window=self.body)
-        self.body.bind("<Configure>", lambda _: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(window, width=e.width))
-        self.canvas.configure(yscrollcommand=bar.set)
-        self.canvas.pack(side="left", fill="both", expand=True)
-        bar.pack(side="right", fill="y")
+        self.window = self.canvas.create_window(0, 0, anchor="nw", window=self.body)
+        self.body.bind("<Configure>", self.resize_content)
+        self.canvas.bind("<Configure>", self.resize_content)
+        self.canvas.configure(yscrollcommand=self.bar.set)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.bar.grid(row=0, column=1, sticky="ns")
+
+    def resize_content(self, _=None):
+        width = self.canvas.winfo_width()
+        height = self.canvas.winfo_height()
+        content_height = self.body.winfo_reqheight()
+        self.canvas.itemconfigure(self.window, width=width)
+        self.canvas.configure(scrollregion=(0, 0, width, max(height, content_height)))
+        if content_height <= height:
+            self.canvas.yview_moveto(0)
 
     def wheel(self, event):
-        units = -int(event.delta / 120) if event.delta else (-1 if event.num == 4 else 1)
+        if self.body.winfo_reqheight() <= self.canvas.winfo_height():
+            return "break"
+        if event.delta:
+            units = int(-event.delta / 120) or (-1 if event.delta > 0 else 1)
+        else:
+            units = -1 if event.num == 4 else 1
         self.canvas.yview_scroll(units * 3, "units")
+        return "break"
+
+    def bind_wheel(self, top):
+        def scroll(event):
+            if str(event.widget).startswith(str(self) + ".") or event.widget is self:
+                return self.wheel(event)
+        for event in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            top.bind(event, scroll, add="+")
 
 
 class Preview(tk.Toplevel):
@@ -167,13 +236,11 @@ class Preview(tk.Toplevel):
 
         header = tk.Frame(self, bg=T.paper, padx=18, pady=10)
         header.pack(fill="x")
-        label(header, "REVISÃO DO DOCUMENTO", 9, bold=True, fg=T.accent).pack(anchor="w")
-        label(header, title, 17, bold=True).pack(anchor="w", pady=(2, 0))
-        workflow(self, 2).pack(fill="x")
+        label(header, f"Revisão · {title}", 15, bold=True).pack(anchor="w")
 
         toolbar = tk.Frame(self, bg=T.paper, padx=18, pady=8)
-        toolbar.pack(fill="x")
-        ttk.Button(toolbar, text="Voltar", command=self.close).pack(side="left")
+        toolbar.pack(side="bottom", fill="x")
+        ttk.Button(toolbar, text="Voltar e editar", command=self.close).pack(side="left")
         controls.button(toolbar, "Salvar PDF", "save", self.confirm, primary=True).pack(side="right")
         controls.button(toolbar, "Imprimir", "print", self.print_document).pack(side="right", padx=8)
         self.bind("<Control-s>", lambda _: self.confirm())
@@ -187,23 +254,13 @@ class Preview(tk.Toplevel):
         label(side, "Resumo da revisão", 13, bold=True, padx=13, pady=9).pack(fill="x")
         summary = ScrollArea(side, background=T.paper)
         summary.pack(fill="both", expand=True, padx=9, pady=(0, 7))
-        for caption, value in details:
-            if caption == "Lotes resultantes" and not value:
-                continue
-            cell = tk.Frame(summary.body, bg=T.paper, padx=5, pady=5)
-            cell.pack(fill="x")
-            label(cell, caption, 9, fg=T.muted).pack(anchor="w")
-            label(cell, value or "Não informado", 10, bold=bool(value), wraplength=220,
-                  justify="left").pack(anchor="w", pady=(2, 0))
-            tk.Frame(summary.body, bg=T.line, height=1).pack(fill="x", padx=5)
+        show_summary(summary.body, details, width=216)
         label(summary.body, "ARQUIVO PDF", 8, bold=True, fg=T.accent,
               padx=5, pady=6).pack(fill="x")
         label(summary.body, suggested, 9, wraplength=220, padx=5, justify="left").pack(fill="x")
         label(summary.body, str(destination), 8, fg=T.muted, wraplength=220,
               padx=5, pady=4, justify="left").pack(fill="x")
-        for event in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            self.bind(event, lambda event: summary.wheel(event)
-                      if str(event.widget).startswith(str(summary)) else None, add="+")
+        summary.bind_wheel(self)
 
         viewer = tk.Frame(content, bg=T.paper, highlightbackground=T.line, highlightthickness=1)
         viewer.pack(side="left", fill="both", expand=True)
@@ -318,16 +375,23 @@ class App:
         self.store = store
         self.settings_path = store.root / "appearance.json"
         try:
-            theme = json.loads(self.settings_path.read_text(encoding="utf-8"))["theme"]
-            self.theme = theme if theme in PALETTES else DEFAULT_THEME
-        except (OSError, ValueError, KeyError, TypeError):
-            self.theme = DEFAULT_THEME
+            settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            settings = {}
+        if not isinstance(settings, dict):
+            settings = {}
+        theme = settings.get("theme")
+        if theme == "blue" and "sidebar_expanded" not in settings:
+            theme = DEFAULT_THEME
+        self.theme = theme if isinstance(theme, str) and theme in PALETTES else DEFAULT_THEME
+        self.sidebar_expanded = settings.get("sidebar_expanded") is True
+        self.sidebar_job = None
         T = PALETTES[self.theme]
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.busy = False
         self.scroll = None
+        self.history_scroll = None
         self.nav_buttons = {}
-        self.active_nav = None
         self.root.title(APP_TITLE)
         self.root.configure(bg=T.bg)
         width, height = self.root.maxsize()
@@ -355,7 +419,7 @@ class App:
         style.configure(".", font=(FONT, 10), foreground=T.ink)
         style.configure("TButton", padding=(13, 8), foreground=T.accent, font=(FONT, 10, "bold"),
                         focuscolor=T.accent)
-        style.configure("Nav.TButton", padding=(9, 7), width=-1, foreground=T.ink, font=(FONT, 10))
+        style.configure("Nav.TButton", padding=(11, 7), width=-1, anchor="w", foreground=T.ink, font=(FONT, 10))
         style.configure("Selected.Nav.TButton", foreground=T.accent, font=(FONT, 10, "bold"))
         style.map("TButton", foreground=[("disabled", T.muted)])
         style.configure("Accent.TButton", foreground="#ffffff", focuscolor="#ffffff")
@@ -382,7 +446,7 @@ class App:
                 self.root.iconbitmap(default=str(logo.with_suffix(".ico")))
             except tk.TclError:
                 pass
-        self.sidebar = tk.Frame(workspace, bg=T.nav, width=175)
+        self.sidebar = tk.Frame(workspace, bg=T.nav, width=180 if self.sidebar_expanded else 56)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
         tk.Frame(workspace, bg=T.line, width=1).pack(side="left", fill="y")
@@ -396,7 +460,7 @@ class App:
         self.menu_toggle = ttk.Button(self.sidebar, image=self.controls.icons["menu", False],
                                       compound="left", style="Nav.TButton",
                                       command=lambda: self.set_sidebar(not self.sidebar_expanded))
-        self.menu_toggle.pack(fill="x", padx=5, pady=(0, 4))
+        self.menu_toggle.pack(side="bottom", fill="x", padx=5, pady=9)
         self.nav_tooltip(self.menu_toggle, lambda: "Recolher menu" if self.sidebar_expanded else "Expandir menu")
         links = (
             ("Início", "home", self.dashboard),
@@ -413,18 +477,47 @@ class App:
             button.pack(fill="x", padx=5, pady=1)
             self.nav_buttons[name] = button
             self.nav_tooltip(button, lambda name=name: name if not self.sidebar_expanded else "")
-        self.set_sidebar(True)
+        self.sidebar_labels(self.sidebar_expanded)
 
-    def set_sidebar(self, expanded):
-        self.sidebar_expanded = expanded
-        self.sidebar.configure(width=175 if expanded else 53)
-        if expanded:
+    def sidebar_labels(self, visible):
+        if visible:
             self.brand_name.pack(side="left", padx=(5, 0))
         else:
             self.brand_name.pack_forget()
-        self.menu_toggle.configure(text="Recolher" if expanded else "")
+        self.menu_toggle.configure(text="Recolher" if visible else "",
+                                   image=self.controls.icons["collapse" if self.sidebar_expanded else "expand", False])
         for name, button in self.nav_buttons.items():
-            button.configure(text=name if expanded else "")
+            button.configure(text=name if visible else "")
+
+    def save_appearance(self, theme):
+        atomic_write(self.settings_path, json.dumps({
+            "theme": theme, "sidebar_expanded": self.sidebar_expanded,
+        }).encode("utf-8"))
+
+    def set_sidebar(self, expanded):
+        self.sidebar_expanded = expanded
+        try:
+            self.save_appearance(self.theme)
+        except OSError:
+            pass  # The menu remains usable even when settings cannot be saved.
+        if self.sidebar_job is not None:
+            self.root.after_cancel(self.sidebar_job)
+        self.sidebar_labels(False)
+        start = int(self.sidebar.cget("width"))
+        target = 180 if expanded else 56
+        started = monotonic()
+
+        def step():
+            elapsed = min(1, (monotonic() - started) / .18)
+            width = round(start + (target - start) * (1 - (1 - elapsed) ** 3))
+            self.sidebar.configure(width=width)
+            if elapsed < 1:
+                self.sidebar_job = self.root.after(15, step)
+            else:
+                self.sidebar_job = None
+                self.sidebar_labels(self.sidebar_expanded)
+
+        step()
 
     def nav_tooltip(self, widget, text):
         pending = None
@@ -478,7 +571,7 @@ class App:
 
         def apply():
             try:
-                atomic_write(self.settings_path, json.dumps({"theme": selection.get()}).encode("utf-8"))
+                self.save_appearance(selection.get())
             except OSError as exc:
                 self.error(exc)
                 return
@@ -523,18 +616,17 @@ class App:
             action()
 
     def wheel(self, event):
-        if self.scroll and str(event.widget).startswith(str(self.scroll)):
-            self.scroll.wheel(event)
+        for area in (self.scroll, self.history_scroll):
+            if area and str(event.widget).startswith(str(area) + "."):
+                return area.wheel(event)
 
     def page(self, active, kicker, title, description, *, compact=False):
         for child in self.main.winfo_children():
             child.destroy()
         self.scroll = None
+        self.history_scroll = None
         for name, button in self.nav_buttons.items():
             button.configure(style="Selected.Nav.TButton" if name == active else "Nav.TButton")
-        if active != self.active_nav:
-            self.set_sidebar(active == "Início")
-        self.active_nav = active
         if compact:
             header = tk.Frame(self.main, bg=T.paper, padx=13, pady=7)
             header.pack(fill="x")
@@ -551,8 +643,11 @@ class App:
             return
         header = tk.Frame(self.main, bg=T.paper, padx=20, pady=11)
         header.pack(fill="x")
-        label(header, kicker.upper(), 8, bold=True, fg=T.accent).pack(anchor="w")
-        label(header, title, 22, bold=True).pack(anchor="w", pady=(4, 3))
+        if kicker:
+            label(header, kicker.upper(), 8, bold=True, fg=T.accent).pack(anchor="w")
+        title_label = label(header, title, 18, bold=True, wraplength=480, justify="left")
+        title_label.pack(fill="x", pady=(2, 2))
+        title_label.bind("<Configure>", lambda event: title_label.configure(wraplength=max(80, event.width)))
         description_label = label(header, description, 10, fg=T.muted, wraplength=595, justify="left")
         description_label.pack(fill="x")
         header.bind("<Configure>", lambda event: description_label.configure(
@@ -590,8 +685,7 @@ class App:
         return box
 
     def dashboard(self):
-        self.page("Início", "Prefeitura de Biquinhas", "Documentos municipais",
-                  "Emita documentos e consulte os arquivos da estação.")
+        self.page("Início", "", "Prefeitura Municipal de Biquinhas", "Setor de Tributos e Arrecadação")
         body = self.scroll_page()
         quick_header = tk.Frame(body, bg=T.bg)
         quick_header.pack(fill="x", padx=(0, 6), pady=(0, 6))
@@ -786,7 +880,7 @@ class App:
         self.busy = True
         self.generate_button.configure(state="disabled")
         self.form_status.configure(text="Gerando o PDF…")
-        future = self.executor.submit(export_pdf, filled)
+        future = self.executor.submit(export_pdf, filled, required_font=layout_font(filled, model.kind))
         def complete():
             if not future.done():
                 self.root.after(90, complete)
@@ -803,7 +897,7 @@ class App:
 
                 preview = Preview(self.root, data, model.title, self.store.destination(model.kind),
                                   f"{stem}.pdf" if number else "PDF com número automático",
-                                  review_details(model, values, fractions, number), archive, self.controls)
+                                  review_details(model.kind, values, fractions, number), archive, self.controls)
                 self.root.wait_window(preview)
                 if preview.saved:
                     rid, version, path = preview.saved
@@ -833,7 +927,7 @@ class App:
 
     def history(self):
         self.page("Histórico", "Arquivo local", "Histórico de documentos",
-                  "Pesquise no repositório e selecione um documento para abrir ou corrigir.")
+                  "Selecione um documento para abrir, editar ou consultar os detalhes.")
         body = tk.Frame(self.main, bg=T.bg, padx=20, pady=9)
         body.pack(fill="both", expand=True)
         query = tk.StringVar()
@@ -850,23 +944,37 @@ class App:
         open_button = self.controls.button(actions, "Abrir PDF", "open", lambda: selected(show_pdf),
                                            state="disabled")
         open_button.pack(side="left")
-        edit_button = self.controls.button(actions, "Corrigir documento", "edit",
+        edit_button = self.controls.button(actions, "Editar", "edit",
                                            lambda: selected(correct), primary=True, state="disabled")
         edit_button.pack(side="left", padx=8)
+        detail_button = self.controls.button(actions, "Detalhes", "details", lambda: selected(toggle_details),
+                                             state="disabled")
+        detail_button.pack(side="left")
         status = label(actions, "", 9, fg=T.muted, bg=T.bg)
         status.pack(side="right", padx=(4, 0))
 
         panel = tk.Frame(body, bg=T.bg)
         panel.pack(fill="both", expand=True)
+        table_panel = tk.Frame(panel, bg=T.bg)
+        table_panel.pack(side="left", fill="both", expand=True)
+        inspector = tk.Frame(panel, bg=T.paper, width=282, highlightbackground=T.line, highlightthickness=1)
+        inspector.pack_propagate(False)
+        inspector_head = tk.Frame(inspector, bg=T.paper, padx=8, pady=6)
+        inspector_head.pack(fill="x")
+        label(inspector_head, "Resumo do documento", 10, bold=True).pack(side="left")
+        ttk.Button(inspector_head, text="Fechar", command=inspector.pack_forget).pack(side="right")
+        summary = ScrollArea(inspector, background=T.paper)
+        summary.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.history_scroll = summary
         columns = [("code", "Código / rev.", 112), ("reference", "Nº / referência", 105),
                    ("owner", "Proprietário", 138), ("model", "Arquivo / tipo", 156), ("date", "Emissão", 85)]
-        table = ttk.Treeview(panel, columns=[x[0] for x in columns], show="headings",
+        table = ttk.Treeview(table_panel, columns=[x[0] for x in columns], show="headings",
                              selectmode="browse", height=3)
-        vertical = ttk.Scrollbar(panel, orient="vertical", command=table.yview)
-        horizontal = ttk.Scrollbar(panel, orient="horizontal", command=table.xview)
+        vertical = ttk.Scrollbar(table_panel, orient="vertical", command=table.yview)
+        horizontal = ttk.Scrollbar(table_panel, orient="horizontal", command=table.xview)
         table.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
-        panel.columnconfigure(0, weight=1)
-        panel.rowconfigure(0, weight=1)
+        table_panel.columnconfigure(0, weight=1)
+        table_panel.rowconfigure(0, weight=1)
         table.grid(row=0, column=0, sticky="nsew")
         vertical.grid(row=0, column=1, sticky="ns")
         horizontal.grid(row=1, column=0, sticky="ew")
@@ -880,7 +988,13 @@ class App:
             selection = table.selection()
             row = rows.get(selection[0]) if selection else None
             open_button.configure(state="normal" if row else "disabled")
+            detail_button.configure(state="normal" if row else "disabled")
             edit_button.configure(state="normal" if row and row["record_id"] is not None else "disabled")
+            if inspector.winfo_manager():
+                if row:
+                    render_details(row)
+                else:
+                    inspector.pack_forget()
 
         def reload_archive():
             try:
@@ -924,13 +1038,36 @@ class App:
             except Exception as exc:
                 self.error(exc)
 
+        def toggle_details(row):
+            if inspector.winfo_manager():
+                inspector.pack_forget()
+            else:
+                inspector.pack(side="right", fill="y", padx=(9, 0), before=table_panel)
+                render_details(row)
+
+        def render_details(row):
+            for child in summary.body.winfo_children():
+                child.destroy()
+            summary.canvas.yview_moveto(0)
+            details = [("Tipo", row["title"]), ("Arquivo PDF", row["path"].name)]
+            record = self.store.record(row["record_id"], row["version"]) if row["record_id"] else None
+            if record:
+                details = review_details(record["kind"], json.loads(record["form"]),
+                                         json.loads(record["fractions"]), record["reference"]) + details
+            else:
+                details.append(("Dados do formulário", "Este PDF foi adicionado pela pasta."))
+            show_summary(summary.body, details, width=240)
+
         def correct(row):
             if row["record_id"] is None:
                 raise ValueError("Este PDF foi adicionado pela pasta e não possui formulário registrado.")
             record = self.store.record(row["record_id"], row["version"])
             if record is None:
                 raise ValueError("A revisão não está mais disponível. Clique em Atualizar.")
-            self.form(Model(record["model_id"], record["title"], record["kind"], record["document"]), record)
+            document = record["document"]
+            if record["kind"] == "desdobro":
+                document = current_desdobro(document)
+            self.form(Model(record["model_id"], record["title"], record["kind"], document), record)
 
         def show_pdf(row):
             if not row["path"].is_file():

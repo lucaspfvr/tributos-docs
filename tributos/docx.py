@@ -1,12 +1,15 @@
 """Fill WordprocessingML text while keeping the document's layout and assets."""
 
 import base64
+import ctypes
 import io
 import os
 import re
 import shutil
 import subprocess
 import sys
+from contextlib import closing
+from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from zipfile import BadZipFile, ZipFile, ZIP_DEFLATED
@@ -136,46 +139,45 @@ def write_package(entries):
     return output.getvalue()
 
 
-def resolve_assessment_font(root, *, footer=False):
+def replace_rich_span(nodes, start, end, pieces):
     from lxml import etree
 
-    # The original assessment uses the East Asian font hint on ordinary
-    # Latin text. Resolve that inherited face on the generated copy only.
-    for paragraph in paragraphs(root):
-        props = paragraph.find(W + "pPr")
-        if props is None or props.find(W + "pStyle") is not None:
+    offset = 0
+    for node in nodes:
+        stop = offset + len(node.text)
+        if start < stop:
+            break
+        offset = stop
+    original_run = node.getparent()
+    prefix = start - offset
+    replace_span(nodes, start, end, "")
+    remainder = (node.text or "")[prefix:]
+    set_text(node, (node.text or "")[:prefix])
+    properties = original_run.find(W + "rPr")
+    tail = original_run
+    for value, bold in [*pieces, (remainder, False)]:
+        if not value:
             continue
-        fonts = props.find(f"{W}rPr/{W}rFonts")
-        if not footer and (fonts is None or fonts.attrib != {W + "hint": "eastAsia"}):
-            continue
-        if footer and fonts is not None and set(fonts.attrib) - {W + "hint"}:
-            continue
-        for run in paragraph.iter(W + "r"):
-            if next(run.iterancestors(W + "p"), None) is not paragraph or run.find(W + "t") is None:
-                continue
-            run_props = run.find(W + "rPr")
-            if run_props is None:
-                run_props = etree.Element(W + "rPr")
-                run.insert(0, run_props)
-            fonts = run_props.find(W + "rFonts")
-            if run_props.find(W + "rStyle") is not None or (fonts is not None and
-                    set(fonts.attrib) - {W + "hint"}):
-                continue
-            if fonts is None:
-                fonts = etree.Element(W + "rFonts")
-                run_props.insert(0, fonts)
-            fonts.attrib.pop(W + "hint", None)
-            for script in ("ascii", "hAnsi", "eastAsia", "cs"):
-                fonts.set(W + script, "Times New Roman")
+        run = etree.Element(W + "r")
+        if properties is not None:
+            run.append(deepcopy(properties))
+        if bold:
+            props = run.find(W + "rPr")
+            if props is None:
+                props = etree.SubElement(run, W + "rPr")
+            flag = props.find(W + "b")
+            if flag is None:
+                flag = etree.SubElement(props, W + "b")
+            flag.set(W + "val", "1")
+        set_text(etree.SubElement(run, W + "t"), value)
+        tail.addnext(run)
+        tail = run
 
 
-def replace_tags(data, values=None, *, assessment=False):
+def replace_tags(data, values=None):
     from lxml import etree
 
     entries = read_package(data)
-    if values is not None and assessment:
-        with ZipFile(Path(__file__).with_name("assets") / "avaliacao.docx") as original:
-            assessment = entries.get("word/styles.xml") == original.read("word/styles.xml")
     keys = {}
     for name, content in list(entries.items()):
         if not PART.fullmatch(name):
@@ -185,6 +187,7 @@ def replace_tags(data, values=None, *, assessment=False):
         simple_fields = (t.get(W + "instr", "") for t in root.iter(W + "fldSimple"))
         if EXTERNAL_FIELD.search(instructions) or any(EXTERNAL_FIELD.search(x) for x in simple_fields):
             raise ValueError("Remova os campos do Word que acessam arquivos ou dados externos.")
+        changed = False
         for paragraph in paragraphs(root):
             for nodes in segments(paragraph):
                 matches = list(KEY.finditer("".join(t.text for t in nodes)))
@@ -194,10 +197,13 @@ def replace_tags(data, values=None, *, assessment=False):
                     for match in reversed(matches):
                         if match[1] not in values:
                             raise ValueError(f"Campo sem valor no formulário: <{match[1]}>.")
-                        replace_span(nodes, *match.span(), values[match[1]])
-        if values is not None:
-            if assessment and (name == "word/document.xml" or name.startswith("word/footer")):
-                resolve_assessment_font(root, footer=name.startswith("word/footer"))
+                        value = values[match[1]]
+                        if match[1] == "FracoesEmLinha" and isinstance(value, list):
+                            replace_rich_span(nodes, *match.span(), value)
+                        else:
+                            replace_span(nodes, *match.span(), value)
+                        changed = True
+        if changed:
             entries[name] = etree.tostring(root)
     return list(keys) if values is None else write_package(entries)
 
@@ -254,7 +260,66 @@ def export_with_libreoffice(executable, source, pdf):
         raise ValueError("O LibreOffice terminou sem gerar o PDF. Revise o modelo no Writer.")
 
 
-def export_pdf(document):
+HEADING = "MODELO DEMONSTRATIVO"
+BERNARD = "Bernard MT Condensed"
+
+
+def layout_font(document, kind):
+    if kind not in {"desdobro", "retificacao", "avaliacao"}:
+        return None
+    with ZipFile(io.BytesIO(document)) as package:
+        if kind == "avaliacao":
+            if "word/styles.xml" in package.namelist():
+                styles = xml(package.read("word/styles.xml"))
+                normal = styles.find(f'{W}style[@{W}default="1"][@{W}type="paragraph"]')
+                fonts = normal.find(f"{W}rPr/{W}rFonts") if normal is not None else None
+                if fonts is not None and fonts.get(W + "ascii") == "Aptos":
+                    for paragraph in paragraphs(xml(package.read("word/document.xml"))):
+                        title = "".join(t.text or "" for t in paragraph.iter(W + "t"))
+                        if title == "AVALIAÇÃO MUNICIPAL DE IMÓVEL":
+                            return "Aptos"
+        else:
+            for name in package.namelist():
+                if re.fullmatch(r"word/header[0-9]+\.xml", name):
+                    for run in xml(package.read(name)).iter(W + "r"):
+                        fonts = run.find(f"{W}rPr/{W}rFonts")
+                        if fonts is not None and fonts.get(W + "ascii") == BERNARD:
+                            if HEADING in "".join(t.text or "" for t in run.iter(W + "t")):
+                                return BERNARD
+    return None
+
+
+def verify_pdf_font(data, required):
+    if required is None:
+        return
+    import pypdfium2 as pdfium
+    from pypdfium2 import raw
+
+    def font_at(text, index):
+        buffer = ctypes.create_string_buffer(256)
+        raw.FPDFText_GetFontInfo(text, index, buffer, len(buffer), None)
+        return re.sub(r"[^a-z]", "", buffer.value.decode("ascii", errors="ignore").lower())
+
+    name = re.sub(r"[^a-z]", "", required.lower())
+    with pdfium.PdfDocument(data) as pdf, closing(pdf[0]) as page, closing(page.get_textpage()) as text:
+        characters = [chr(raw.FPDFText_GetUnicode(text, i)) for i in range(text.count_chars())]
+        if required == BERNARD:
+            match = re.search(HEADING.replace(" ", r"\s+"), "".join(characters))
+            if match:
+                letters = [i for i in range(*match.span()) if characters[i].isalpha()]
+                baselines = [text.get_charbox(i)[1] for i in letters]
+                if max(baselines) - min(baselines) < 5 and all(name in font_at(text, i) for i in letters):
+                    return
+        elif any(name in font_at(text, i) for i, c in enumerate(characters) if c.isalpha()):
+            return
+    if required == BERNARD:
+        raise ValueError("O PDF não preservou o cabeçalho em Bernard MT Condensed. Abra o modelo no Word, "
+                         "confirme que a fonte Bernard MT Condensed está disponível e tente novamente.")
+    raise ValueError("O PDF não utilizou a fonte Aptos. Instale a fonte pelo instalador do Tributos Docs "
+                     "e reabra o Word ou o Writer.")
+
+
+def export_pdf(document, *, required_font=None):
     with TemporaryDirectory(prefix="conversao-", ignore_cleanup_errors=True) as folder:
         path = Path(folder)
         source = path / "Documento.docx"
@@ -264,7 +329,9 @@ def export_pdf(document):
         if sys.platform == "win32":
             try:
                 export_with_word(source, pdf)
-                return pdf.read_bytes()
+                data = pdf.read_bytes()
+                verify_pdf_font(data, required_font)
+                return data
             except ValueError as exc:
                 word_error = exc
         executable = libreoffice()
@@ -274,4 +341,6 @@ def export_pdf(document):
             raise ValueError("Instale o LibreOffice Writer para gerar o PDF neste sistema.")
         pdf.unlink(missing_ok=True)
         export_with_libreoffice(executable, source, pdf)
-        return pdf.read_bytes()
+        data = pdf.read_bytes()
+        verify_pdf_font(data, required_font)
+        return data

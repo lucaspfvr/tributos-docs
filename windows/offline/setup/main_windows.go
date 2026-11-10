@@ -24,7 +24,7 @@ const (
 
 func main() {
 	body := "Instalar o Tributos Docs neste computador?\n\nO pacote já contém o Python e as bibliotecas do aplicativo."
-	body += "\n\nO instalador também inclui o LibreOffice para computadores que precisarem de um conversor de PDF."
+	body += "\n\nO pacote inclui o LibreOffice para quem precisar de um conversor de PDF e oferece a instalação da fonte Aptos oficial."
 	if dialog(body, okCancel|iconInfo) != confirmed {
 		return
 	}
@@ -73,6 +73,19 @@ func install(word, libreOffice bool) error {
 	}
 	launcher := filepath.Join(target, "Tributos-Docs.exe")
 	result := "O Tributos Docs foi instalado."
+	if !aptosInstalled() {
+		if dialog("A Avaliação Municipal usa a fonte Aptos. Deseja instalar a fonte agora?\n\n"+
+			"O instalador usa o ZIP oficial ao lado deste .exe, se estiver presente, ou baixa a fonte da Microsoft.",
+			yesNo|iconInfo) == yes {
+			if err := installAptos(executable, local); err != nil {
+				result += "\n\nA fonte Aptos ainda precisa ser instalada. " + err.Error()
+			} else {
+				result += "\n\nA fonte Aptos foi instalada. Se o Word ou o Writer estiver aberto, feche e abra novamente."
+			}
+		} else {
+			result += "\n\nA fonte Aptos poderá ser instalada executando este instalador novamente."
+		}
+	}
 	if err := createShortcuts(launcher); err != nil {
 		result += "\n\nUm atalho não pôde ser criado. O aplicativo está em " + launcher
 	} else {

@@ -29,6 +29,22 @@ class ExportTest(unittest.TestCase):
              patch.object(docx, "export_with_libreoffice", side_effect=libreoffice):
             self.assertEqual(docx.export_pdf(b"docx"), b"%PDF-libreoffice")
 
+    def test_does_not_accept_a_pdf_with_substituted_header_font(self):
+        def word(source, pdf):
+            pdf.write_bytes(b"word")
+
+        def libreoffice(executable, source, pdf):
+            pdf.write_bytes(b"writer")
+
+        with patch.object(docx.sys, "platform", "win32"), \
+             patch.object(docx, "export_with_word", side_effect=word), \
+             patch.object(docx, "libreoffice", return_value="soffice"), \
+             patch.object(docx, "export_with_libreoffice", side_effect=libreoffice), \
+             patch.object(docx, "verify_pdf_font", side_effect=ValueError("Cabeçalho substituído")) as verify:
+            with self.assertRaisesRegex(ValueError, "Cabeçalho substituído"):
+                docx.export_pdf(b"docx", required_font=docx.BERNARD)
+            self.assertEqual([call.args[0] for call in verify.call_args_list], [b"word", b"writer"])
+
     def test_reports_word_failure_when_no_fallback_is_available(self):
         with patch.object(docx.sys, "platform", "win32"), \
              patch.object(docx, "export_with_word", side_effect=ValueError("Word indisponível")), \

@@ -48,7 +48,7 @@ REQUIRED = {
     "retificacao": {"Matricula", "Livro", "CimImovel", "Quadra", "Lote", "AreaMensurada",
                     "LogradouroImovel", "NumeroImovel", "NomeProprietario", "CpfCnpj", "DataExtenso"},
 }
-DERIVED = {"Fracoes", "QuantidadeFracoes", "DescricaoFracoes", "SegundoProprietario", "ValorExtenso"}
+DERIVED = {"Fracoes", "FracoesEmLinha", "QuantidadeFracoes", "DescricaoFracoes", "SegundoProprietario", "ValorExtenso"}
 ADDRESS_PARTS = ("Logradouro", "Numero", "Complemento", "Bairro", "Municipio", "Uf", "Cep")
 FRACTION_FIELDS = {"lote": "Lote / identificação", "area": "Área total (m²)",
                    "endereco": "Logradouro completo", "numero": "Número"}
@@ -85,7 +85,7 @@ class Model:
         return {title: fields for title, fields in groups.items() if fields}
 
     def has_fractions(self):
-        return bool({"Fracoes", "QuantidadeFracoes", "DescricaoFracoes"} & set(self.keys()))
+        return bool({"Fracoes", "FracoesEmLinha", "QuantidadeFracoes", "DescricaoFracoes"} & set(self.keys()))
 
 
 def defaults():
@@ -192,9 +192,12 @@ def prepare(model, fields, fractions):
         values["QuantidadeFracoes"] = f"{len(fractions):02d}"
         values["DescricaoFracoes"] = "fração assim denominada" if len(fractions) == 1 else "frações assim denominadas"
         lines = []
+        inline = []
         for index, fraction in enumerate(fractions, 1):
             row = {key: fraction.get(key, "").strip() for key in FRACTION_FIELDS}
             for key, label in FRACTION_FIELDS.items():
+                if key == "numero" and "FracoesEmLinha" in keys and "Fracoes" not in keys:
+                    continue
                 if not row[key]:
                     raise ValueError(f"Fração {index} · preencha «{label}».")
             area = number_br(row["area"], f"a área da fração {index}", positive=True)
@@ -202,6 +205,15 @@ def prepare(model, fields, fractions):
             if not lot.casefold().startswith("lote "):
                 lot = f"Lote {lot}"
             lines.append(f"{lot}, com uma área total de {area} m², situado em {row['endereco']}, nº {row['numero']}")
+            if "FracoesEmLinha" in keys:
+                street = row["endereco"]
+                if not re.match(r"(?i)^(rua|avenida|av\.|praça|travessa|estrada|rodovia|alameda|beco)\s", street):
+                    street = "rua " + street
+                number = row["numero"]
+                address = f", {number}" if number.upper() in {"S/N", "SN"} else f", nº {number}" if number else ""
+                if inline:
+                    inline.append((" e " if index == len(fractions) else ", ", False))
+                inline.extend([(lot, True), (f", com uma área total de {area}m², situado à {street}{address}", False)])
         values["Fracoes"] = ";\n".join(lines)
-    return replace_tags(model.document, {key: values.get(key, "") for key in keys},
-                        assessment=model.kind == "avaliacao")
+        values["FracoesEmLinha"] = inline
+    return replace_tags(model.document, {key: values.get(key, "") for key in keys})
